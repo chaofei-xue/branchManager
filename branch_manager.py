@@ -353,7 +353,7 @@ def get_merged_feature_branches(int_branch):
     """通过 DREO-MERGE 标志位查找曾被集成到该分支的所有开发分支
     格式: [DREO-MERGE] {int_branch} <- branch1,branch2,...
     """
-    _, log, _ = run_git('log', '--all', f'--grep={MERGE_TAG} {int_branch} <-',
+    _, log, _ = run_git('log', '--all', '-F', f'--grep={MERGE_TAG} {int_branch} <-',
                         '--pretty=format:%s')
     seen, result = set(), []
     for line in log.splitlines():
