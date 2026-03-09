@@ -36,6 +36,17 @@ def check_git_repo():
         sys.exit(1)
 
 
+def check_rerere():
+    """检查 rerere 是否开启，未开启则提示用户"""
+    _, val, _ = run_git('config', '--local', 'rerere.enabled')
+    if val != 'true':
+        print("\n  [提示] 未开启 rerere（冲突记忆）功能。")
+        print("  开启后，同一冲突只需手动解决一次，后续合并将自动重用解决方案。")
+        if confirm("现在为此仓库开启 rerere？"):
+            run_git('config', '--local', 'rerere.enabled', 'true')
+            print("  [✓] rerere 已开启。")
+
+
 def get_current_branch():
     _, branch, _ = run_git('rev-parse', '--abbrev-ref', 'HEAD')
     return branch
@@ -176,6 +187,22 @@ def do_merge(source_branch):
         print(f"  [✓] 合并成功: {source_branch}")
         return True
     if 'CONFLICT' in out or 'CONFLICT' in err:
+        # 尝试让 rerere 自动应用已记录的解决方案
+        _, rerere_out, _ = run_git('rerere')
+        if rerere_out:
+            # rerere 有输出说明应用了记录，检查是否还有残余冲突
+            _, status, _ = run_git('status', '--porcelain')
+            still_conflict = [l for l in status.splitlines()
+                              if l[:2] in ('UU', 'AA', 'DD', 'AU', 'UA', 'DU', 'UD')]
+            if not still_conflict:
+                # 全部自动解决，暂存并提交
+                run_git('add', '-u')
+                commit_ok, _, commit_err = run_git('commit', '--no-edit')
+                if commit_ok:
+                    print(f"  [✓] rerere 自动重用了历史解决方案，合并完成: {source_branch}")
+                    print("  [提示] 请检查自动解决的文件是否符合预期。")
+                    return True
+                print(f"  [!] 自动提交失败: {commit_err}")
         return handle_conflict(source_branch)
     print(f"  [!] 合并失败: {err or out}")
     return False
@@ -577,6 +604,7 @@ def main():
     print("═" * 52)
 
     check_git_repo()
+    check_rerere()
 
     menu = {
         '1': ('创建开发分支（feature / bugfix）', create_feature_branch),
