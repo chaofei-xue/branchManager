@@ -81,7 +81,7 @@ def get_master_branch():
 
 # ─── 终端 UI 工具 ─────────────────────────────────────────────────
 
-def sep(char='─', width=52):
+def sep(char='─', width=64):
     print(char * width)
 
 
@@ -607,19 +607,21 @@ def show_status():
 
 
 def main():
-    print("\n" + "═" * 52)
-    print("   Dreo 分支管理工具")
-    print("═" * 52)
+    print("\n" + "═" * 64)
+    print("\n  【Dreo 分支管理工具】\n")
+    print("  开发分支：承载具体功能开发与缺陷修复，基于最新 master 拉出。")
+    print("  集成分支：用于集成和发布，在各环境进行部署，请勿在此分支提交业务代码。")
+    print("═" * 64)
 
     check_git_repo()
     check_rerere()
 
     menu = {
         '1': ('创建开发分支（feature / bugfix）', create_feature_branch),
-        '2': ('创建集成分支（合并开发分支）', create_integration_branch),
-        '3': ('同步更新集成分支（重新合并已集成的开发分支）', update_integration_branch),
-        '4': ('删除本地分支（多选）', delete_local_branches),
-        '5': ('合并发布分支回 master（基线写入）', merge_to_master),
+        '2': ('创建集成分支（测试 / 生产）', create_integration_branch),
+        '3': ('更新集成分支（再次合并已集成开发分支）', update_integration_branch),
+        '4': ('删除本地分支', delete_local_branches),
+        '5': ('合并集成分支到master', merge_to_master),
         '0': ('退出', None),
     }
 
