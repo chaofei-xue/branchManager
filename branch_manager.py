@@ -137,12 +137,15 @@ def confirm(prompt):
 MERGE_TAG = '[DREO-MERGE]'
 
 
-def make_merge_msg(int_branch, feature_branch):
-    """生成带标志位的 commit 信息，用于后续追踪哪些分支被集成过"""
-    return f"{MERGE_TAG} {int_branch} <- {feature_branch}"
+def write_tracking_commit(int_branch, branches):
+    """写一条空提交，记录本次集成的所有开发分支，格式：
+    [DREO-MERGE] {int_branch} <- branch1,branch2,...
+    """
+    msg = f"{MERGE_TAG} {int_branch} <- {','.join(branches)}"
+    run_git('commit', '--allow-empty', '-m', msg)
 
 
-def handle_conflict(merging_branch, commit_msg=None):
+def handle_conflict(merging_branch):
     """引导用户解决合并冲突，返回是否最终成功"""
     print(f"\n  [!] 合并 [{merging_branch}] 时发生冲突！")
     print("\n  请在另一个终端中执行以下步骤：")
@@ -168,11 +171,7 @@ def handle_conflict(merging_branch, commit_msg=None):
                 print("  请解决全部冲突并 git add 后再继续。")
                 continue
 
-            # 使用自定义 commit 信息（若有），否则沿用 git 默认
-            if commit_msg:
-                ok, _, err = run_git('commit', '-m', commit_msg)
-            else:
-                ok, _, err = run_git('commit', '--no-edit')
+            ok, _, err = run_git('commit', '--no-edit')
             if ok:
                 print(f"  [✓] 冲突已解决，合并完成: {merging_branch}")
                 return True
@@ -188,23 +187,15 @@ def handle_conflict(merging_branch, commit_msg=None):
             print("  请输入 1 或 2。")
 
 
-def do_merge(source_branch, commit_msg=None):
-    """将 source_branch 合并到当前分支，处理冲突。返回是否成功。
-    commit_msg: 指定时覆盖 git 默认的 merge commit 信息。
-    """
+def do_merge(source_branch):
+    """将 source_branch 合并到当前分支，处理冲突。返回是否成功。"""
     current = get_current_branch()
     print(f"\n  合并 [{source_branch}] → [{current}] ...")
-
-    if commit_msg:
-        ok, out, err = run_git('merge', '--no-ff', '-m', commit_msg, source_branch)
-    else:
-        ok, out, err = run_git('merge', '--no-ff', source_branch)
-
+    ok, out, err = run_git('merge', '--no-ff', source_branch)
     if ok:
         print(f"  [✓] 合并成功: {source_branch}")
         return True
     if 'CONFLICT' in out or 'CONFLICT' in err:
-        # 尝试让 rerere 自动应用已记录的解决方案
         _, rerere_out, _ = run_git('rerere')
         if rerere_out:
             _, status, _ = run_git('status', '--porcelain')
@@ -212,16 +203,13 @@ def do_merge(source_branch, commit_msg=None):
                               if l[:2] in ('UU', 'AA', 'DD', 'AU', 'UA', 'DU', 'UD')]
             if not still_conflict:
                 run_git('add', '-u')
-                if commit_msg:
-                    commit_ok, _, commit_err = run_git('commit', '-m', commit_msg)
-                else:
-                    commit_ok, _, commit_err = run_git('commit', '--no-edit')
+                commit_ok, _, commit_err = run_git('commit', '--no-edit')
                 if commit_ok:
                     print(f"  [✓] rerere 自动重用了历史解决方案，合并完成: {source_branch}")
                     print("  [提示] 请检查自动解决的文件是否符合预期。")
                     return True
                 print(f"  [!] 自动提交失败: {commit_err}")
-        return handle_conflict(source_branch, commit_msg)
+        return handle_conflict(source_branch)
     print(f"  [!] 合并失败: {err or out}")
     return False
 
@@ -339,10 +327,14 @@ def create_integration_branch():
 
     succeeded, failed = [], []
     for branch in selected:
-        if do_merge(branch, commit_msg=make_merge_msg(int_branch, branch)):
+        if do_merge(branch):
             succeeded.append(branch)
         else:
             failed.append(branch)
+
+    # 写汇总追踪提交（记录所有选中的分支，无论是否产生 merge commit）
+    if succeeded:
+        write_tracking_commit(int_branch, selected)
 
     # 结果汇总
     print()
@@ -358,17 +350,21 @@ def create_integration_branch():
 # ─── 功能 3：同步更新集成分支 ────────────────────────────────────
 
 def get_merged_feature_branches(int_branch):
-    """通过 DREO-MERGE 标志位查找曾被合并到该集成分支的开发分支名称"""
+    """通过 DREO-MERGE 标志位查找曾被集成到该分支的所有开发分支
+    格式: [DREO-MERGE] {int_branch} <- branch1,branch2,...
+    """
     _, log, _ = run_git('log', '--all', f'--grep={MERGE_TAG} {int_branch} <-',
                         '--pretty=format:%s')
     seen, result = set(), []
     for line in log.splitlines():
-        # 格式: [DREO-MERGE] {int_branch} <- {feature_branch}
-        if '<-' in line:
-            feature = line.split('<-', 1)[-1].strip()
-            if feature and feature not in seen:
-                seen.add(feature)
-                result.append(feature)
+        if '<-' not in line:
+            continue
+        branch_list = line.split('<-', 1)[-1].strip()
+        for b in branch_list.split(','):
+            b = b.strip()
+            if b and b not in seen:
+                seen.add(b)
+                result.append(b)
     return result
 
 
@@ -430,10 +426,14 @@ def update_integration_branch():
             continue
 
         print(f"\n  [{branch}] 有 {new_commits} 个新提交，执行合并...")
-        if do_merge(branch, commit_msg=make_merge_msg(int_branch, branch)):
+        if do_merge(branch):
             succeeded.append(branch)
         else:
             failed.append(branch)
+
+    # 同步后更新追踪提交（记录本次实际同步的分支）
+    if succeeded:
+        write_tracking_commit(int_branch, succeeded)
 
     print()
     sep()
