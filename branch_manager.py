@@ -261,20 +261,62 @@ def create_feature_branch():
         print(f"\n  [!] 创建分支失败: {err}")
 
 
-# ─── 功能 2：创建/更新集成分支 ───────────────────────────────────
+# ─── 集成分支公共：选分支并合并 ──────────────────────────────────
+
+def _merge_into_integration(int_branch, candidates, action_name="合并"):
+    """将 candidates 中用户选中的分支合并到 int_branch，写追踪提交。"""
+    sorted_c = sort_branches_by_date(candidates, limit=len(candidates))
+    total = len(candidates)
+    if total > 10:
+        print(f"\n  [提示] 共 {total} 个开发分支，按时间倒序显示最新 10 条：")
+    else:
+        print(f"\n  选择要{action_name}到 [{int_branch}] 的开发分支：")
+    selected = [sorted_c[i] for i in select_many(sorted_c)]
+
+    print(f"\n  将{action_name}以下分支 → [{int_branch}]：")
+    for b in selected:
+        print(f"    · {b}")
+    if not confirm(f"确认执行{action_name}？"):
+        print("  已取消。")
+        return
+
+    run_git('checkout', int_branch)
+    succeeded, failed = [], []
+    for branch in selected:
+        if do_merge(branch):
+            succeeded.append(branch)
+        else:
+            failed.append(branch)
+
+    if succeeded:
+        write_tracking_commit(int_branch, selected)
+
+    print()
+    sep()
+    print(f"  {action_name}结果汇总：")
+    if succeeded:
+        print(f"  [✓] 成功 ({len(succeeded)}): " + ", ".join(succeeded))
+    if failed:
+        print(f"  [✗] 跳过 ({len(failed)}): " + ", ".join(failed))
+    print(f"\n  当前所在集成分支: {get_current_branch()}")
+
+
+# ─── 功能 2.1：创建集成分支 ───────────────────────────────────────
 
 def create_integration_branch():
-    header("创建集成分支（合并开发分支）")
+    header("2.1  创建集成分支")
 
     feature_branches = get_feature_branches()
     if not feature_branches:
         print("  [!] 没有找到开发分支（feature_ / bugfix_ 开头）。")
-        print("  请先使用功能 1 创建开发分支。")
+        print("  请先使用「1. 创建开发分支」。")
         return
 
     base = get_master_branch()
+    if not base:
+        print("  [!] 未找到 master / main 分支。")
+        return
 
-    # 选择集成环境
     print("  请选择集成分支用途：")
     env_idx = select_one(
         ['dev     — 测试/日常环境集成', 'release — 预发/生产环境集成'],
@@ -282,7 +324,6 @@ def create_integration_branch():
     )
     env_prefix = ['dev', 'release'][env_idx]
 
-    # 输入版本号
     date_suffix = today_str()
     while True:
         version = input(f"\n  版本号或名称（将创建: {env_prefix}_<版本>_{date_suffix}）: ").strip()
@@ -291,60 +332,47 @@ def create_integration_branch():
         print("  版本号不能为空。")
 
     int_branch = f"{env_prefix}_{version}_{date_suffix}"
-    existing = get_local_branches()
-
-    if int_branch in existing:
-        print(f"\n  [提示] 分支 '{int_branch}' 已存在。")
-        if not confirm("向该分支追加合并开发分支？"):
-            return
-        run_git('checkout', int_branch)
-    else:
-        if not base:
-            print("  [!] 未找到 master / main 分支。")
-            return
-        print(f"\n  从 {base} 创建集成分支 {int_branch}...")
-        run_git('checkout', base)
-        ok, _, err = run_git('checkout', '-b', int_branch)
-        if not ok:
-            print(f"  [!] 创建失败: {err}")
-            return
-        print(f"  [✓] 已创建集成分支: {int_branch}")
-
-    # 选择要合并的开发分支（按日期倒序，最多显示 10 条）
-    sorted_features = sort_branches_by_date(feature_branches)
-    if len(feature_branches) > 10:
-        print(f"\n  [提示] 共 {len(feature_branches)} 个开发分支，按时间倒序显示最新 10 条：")
-    else:
-        print(f"\n  选择要合并到 [{int_branch}] 的开发分支：")
-    selected = [sorted_features[i] for i in select_many(sorted_features)]
-
-    print(f"\n  将合并以下分支 → [{int_branch}]：")
-    for b in selected:
-        print(f"    · {b}")
-    if not confirm("确认执行合并？"):
-        print("  已取消。")
+    if int_branch in get_local_branches():
+        print(f"\n  [!] 分支 '{int_branch}' 已存在，请使用「2.3 添加新的开发分支」功能。")
         return
 
-    succeeded, failed = [], []
-    for branch in selected:
-        if do_merge(branch):
-            succeeded.append(branch)
-        else:
-            failed.append(branch)
+    print(f"\n  从 {base} 创建集成分支 {int_branch}...")
+    run_git('checkout', base)
+    ok, _, err = run_git('checkout', '-b', int_branch)
+    if not ok:
+        print(f"  [!] 创建失败: {err}")
+        return
+    print(f"  [✓] 已创建集成分支: {int_branch}")
 
-    # 写汇总追踪提交（记录所有选中的分支，无论是否产生 merge commit）
-    if succeeded:
-        write_tracking_commit(int_branch, selected)
+    _merge_into_integration(int_branch, feature_branches, action_name="合并")
 
-    # 结果汇总
-    print()
-    sep()
-    print("  合并结果汇总：")
-    if succeeded:
-        print(f"  [✓] 成功 ({len(succeeded)}): " + ", ".join(succeeded))
-    if failed:
-        print(f"  [✗] 跳过 ({len(failed)}): " + ", ".join(failed))
-    print(f"\n  当前所在集成分支: {get_current_branch()}")
+
+# ─── 功能 2.3：添加新的开发分支到集成分支 ────────────────────────
+
+def add_branches_to_integration():
+    header("2.3  添加新的开发分支到集成分支")
+
+    int_branches = get_integration_branches()
+    if not int_branches:
+        print("  [!] 没有找到集成分支，请先创建。")
+        return
+
+    print("  请选择目标集成分支：")
+    int_branch = int_branches[select_one(int_branches)]
+
+    # 已集成的分支
+    already = set(get_merged_feature_branches(int_branch))
+    all_features = get_feature_branches()
+    candidates = [b for b in all_features if b not in already]
+
+    if not candidates:
+        print(f"\n  [提示] 所有开发分支均已集成到 [{int_branch}]，无可添加的分支。")
+        return
+
+    if already:
+        print(f"\n  已集成: {', '.join(already)}")
+
+    _merge_into_integration(int_branch, candidates, action_name="添加")
 
 
 # ─── 功能 3：同步更新集成分支 ────────────────────────────────────
@@ -447,10 +475,11 @@ def update_integration_branch():
     print(f"\n  当前所在集成分支: {get_current_branch()}")
 
 
-# ─── 功能 4：删除本地分支 ────────────────────────────────────────
+# ─── 功能 4：删除分支 ────────────────────────────────────────────
 
-def delete_local_branches():
-    header("删除本地分支")
+def delete_branches(include_remote=False):
+    mode = "本地 + 云端" if include_remote else "仅本地"
+    header(f"删除分支（{mode}）")
 
     all_branches = get_local_branches()
     current = get_current_branch()
@@ -522,25 +551,28 @@ def delete_local_branches():
 
     succeeded, failed = [], []
     for branch in selected:
-        # 先尝试安全删除（-d），若分支未合并则提示强制
         ok, _, err = run_git('branch', '-d', branch)
-        if ok:
-            succeeded.append(branch)
-            print(f"  [✓] 已删除: {branch}")
-        else:
-            # 分支有未合并提交，询问是否强制删除
+        if not ok:
             print(f"\n  [!] [{branch}] 包含未合并的提交，无法安全删除。")
             if confirm(f"强制删除 [{branch}]？（提交将丢失）"):
-                ok2, _, err2 = run_git('branch', '-D', branch)
-                if ok2:
-                    succeeded.append(branch)
-                    print(f"  [✓] 已强制删除: {branch}")
-                else:
-                    failed.append(branch)
-                    print(f"  [✗] 删除失败: {err2}")
+                ok, _, err = run_git('branch', '-D', branch)
             else:
                 failed.append(branch)
                 print(f"  [~] 已跳过: {branch}")
+                continue
+
+        if ok:
+            print(f"  [✓] 本地已删除: {branch}")
+            if include_remote:
+                rok, _, rerr = run_git('push', 'origin', '--delete', branch)
+                if rok:
+                    print(f"  [✓] 远端已删除: {branch}")
+                else:
+                    print(f"  [~] 远端删除失败（可能不存在）: {rerr}")
+            succeeded.append(branch)
+        else:
+            failed.append(branch)
+            print(f"  [✗] 删除失败: {err}")
 
     print()
     sep()
@@ -595,7 +627,7 @@ def merge_to_master():
         print(f"\n  [✗] 合并失败或已放弃。")
 
 
-# ─── 主菜单 ──────────────────────────────────────────────────────
+# ─── 菜单系统 ────────────────────────────────────────────────────
 
 def show_status():
     current = get_current_branch()
@@ -606,45 +638,85 @@ def show_status():
           f"  |  集成分支: {len(integrations)}")
 
 
+def run_submenu(title, items):
+    """
+    通用二级菜单。items: [(label, fn), ...]，fn=None 表示返回。
+    返回 True 表示正常退出子菜单，False 表示用户选择返回。
+    """
+    keys = [str(i) for i in range(1, len(items) + 1)] + ['0']
+    while True:
+        show_status()
+        sep()
+        print(f"  {title}：")
+        for i, (label, _) in enumerate(items, 1):
+            print(f"  {i}. {label}")
+        print("  0. 返回上一级")
+        sep()
+
+        choice = input("  请选择: ").strip()
+        if choice == '0':
+            return
+        if choice in keys[:-1]:
+            idx = int(choice) - 1
+            print()
+            items[idx][1]()
+            input("\n  按回车键继续...")
+        else:
+            print(f"  无效输入，请输入 0-{len(items)}。")
+
+
+def menu_integration():
+    run_submenu("集成分支管理", [
+        ("创建集成分支",                   create_integration_branch),
+        ("更新集成分支（同步已集成分支新提交）", update_integration_branch),
+        ("添加新的开发分支到集成分支",        add_branches_to_integration),
+    ])
+
+
+def menu_delete():
+    run_submenu("删除分支", [
+        ("仅本地",       lambda: delete_branches(include_remote=False)),
+        ("本地 + 云端",  lambda: delete_branches(include_remote=True)),
+    ])
+
+
 def main():
     print("\n" + "═" * 64)
     print("\n  【Dreo 分支管理工具】\n")
     print("  开发分支：承载具体功能开发与缺陷修复，基于最新 master 拉出。")
-    print("  集成分支：用于集成和发布，在各环境进行部署，请勿在此分支提交业务代码。")
+    print("  集成分支：用于集成和发布，在各环境进行部署。")
     print("═" * 64)
 
     check_git_repo()
     check_rerere()
 
-    menu = {
-        '1': ('创建开发分支（feature / bugfix）', create_feature_branch),
-        '2': ('创建集成分支（测试 / 生产）', create_integration_branch),
-        '3': ('更新集成分支（再次合并已集成开发分支）', update_integration_branch),
-        '4': ('删除本地分支', delete_local_branches),
-        '5': ('合并集成分支到master', merge_to_master),
-        '0': ('退出', None),
-    }
+    main_items = [
+        ("创建开发分支（feature / bugfix）", create_feature_branch),
+        ("集成分支管理（测试 / 生产）",      menu_integration),
+        ("合并集成分支到 master",            merge_to_master),
+        ("删除分支",                        menu_delete),
+    ]
 
     while True:
         show_status()
         sep()
         print("  主菜单：")
-        for key in ['1', '2', '3', '4', '5', '0']:
-            print(f"  {key}. {menu[key][0]}")
+        for i, (label, _) in enumerate(main_items, 1):
+            print(f"  {i}. {label}")
+        print("  0. 退出")
         sep()
 
         choice = input("  请选择操作: ").strip()
-
         if choice == '0':
             print("\n  再见！\n")
             sys.exit(0)
-        elif choice in menu:
+        elif choice.isdigit() and 1 <= int(choice) <= len(main_items):
             print()
-            menu[choice][1]()
+            main_items[int(choice) - 1][1]()
+            if int(choice) not in (2, 4):   # 子菜单自带循环，无需额外等待
+                input("\n  按回车键返回主菜单...")
         else:
-            print("  无效输入，请输入 0-5。")
-
-        input("\n  按回车键返回主菜单...")
+            print(f"  无效输入，请输入 0-{len(main_items)}。")
 
 
 if __name__ == '__main__':
