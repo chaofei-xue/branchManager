@@ -3,7 +3,6 @@
 Dreo 分支管理工具
 """
 
-import re
 import subprocess
 import sys
 from datetime import date
@@ -34,6 +33,17 @@ def check_git_repo():
     if not ok:
         print("错误：当前目录不是 git 仓库，请在 git 仓库目录中运行此工具。")
         sys.exit(1)
+
+
+def check_rerere():
+    """检查 rerere 是否开启，未开启则提示用户"""
+    _, val, _ = run_git('config', '--local', 'rerere.enabled')
+    if val != 'true':
+        print("\n  [提示] 未开启 rerere（冲突记忆）功能。")
+        print("  开启后，同一冲突只需手动解决一次，后续合并将自动重用解决方案。")
+        if confirm("现在为此仓库开启 rerere？"):
+            run_git('config', '--local', 'rerere.enabled', 'true')
+            print("  [✓] rerere 已开启。")
 
 
 def get_current_branch():
@@ -124,7 +134,15 @@ def confirm(prompt):
 
 # ─── 冲突处理 ────────────────────────────────────────────────────
 
-def handle_conflict(merging_branch):
+MERGE_TAG = '[DREO-MERGE]'
+
+
+def make_merge_msg(int_branch, feature_branch):
+    """生成带标志位的 commit 信息，用于后续追踪哪些分支被集成过"""
+    return f"{MERGE_TAG} {int_branch} <- {feature_branch}"
+
+
+def handle_conflict(merging_branch, commit_msg=None):
     """引导用户解决合并冲突，返回是否最终成功"""
     print(f"\n  [!] 合并 [{merging_branch}] 时发生冲突！")
     print("\n  请在另一个终端中执行以下步骤：")
@@ -140,7 +158,6 @@ def handle_conflict(merging_branch):
         choice = input("\n  请选择 [1/2]: ").strip()
 
         if choice == '1':
-            # 检查是否仍有未解决冲突
             _, status, _ = run_git('status', '--porcelain')
             unresolved = [l for l in status.splitlines()
                           if l[:2] in ('UU', 'AA', 'DD', 'AU', 'UA', 'DU', 'UD')]
@@ -151,7 +168,11 @@ def handle_conflict(merging_branch):
                 print("  请解决全部冲突并 git add 后再继续。")
                 continue
 
-            ok, _, err = run_git('commit', '--no-edit')
+            # 使用自定义 commit 信息（若有），否则沿用 git 默认
+            if commit_msg:
+                ok, _, err = run_git('commit', '-m', commit_msg)
+            else:
+                ok, _, err = run_git('commit', '--no-edit')
             if ok:
                 print(f"  [✓] 冲突已解决，合并完成: {merging_branch}")
                 return True
@@ -167,16 +188,40 @@ def handle_conflict(merging_branch):
             print("  请输入 1 或 2。")
 
 
-def do_merge(source_branch):
-    """将 source_branch 合并到当前分支，处理冲突。返回是否成功。"""
+def do_merge(source_branch, commit_msg=None):
+    """将 source_branch 合并到当前分支，处理冲突。返回是否成功。
+    commit_msg: 指定时覆盖 git 默认的 merge commit 信息。
+    """
     current = get_current_branch()
     print(f"\n  合并 [{source_branch}] → [{current}] ...")
-    ok, out, err = run_git('merge', '--no-ff', source_branch)
+
+    if commit_msg:
+        ok, out, err = run_git('merge', '--no-ff', '-m', commit_msg, source_branch)
+    else:
+        ok, out, err = run_git('merge', '--no-ff', source_branch)
+
     if ok:
         print(f"  [✓] 合并成功: {source_branch}")
         return True
     if 'CONFLICT' in out or 'CONFLICT' in err:
-        return handle_conflict(source_branch)
+        # 尝试让 rerere 自动应用已记录的解决方案
+        _, rerere_out, _ = run_git('rerere')
+        if rerere_out:
+            _, status, _ = run_git('status', '--porcelain')
+            still_conflict = [l for l in status.splitlines()
+                              if l[:2] in ('UU', 'AA', 'DD', 'AU', 'UA', 'DU', 'UD')]
+            if not still_conflict:
+                run_git('add', '-u')
+                if commit_msg:
+                    commit_ok, _, commit_err = run_git('commit', '-m', commit_msg)
+                else:
+                    commit_ok, _, commit_err = run_git('commit', '--no-edit')
+                if commit_ok:
+                    print(f"  [✓] rerere 自动重用了历史解决方案，合并完成: {source_branch}")
+                    print("  [提示] 请检查自动解决的文件是否符合预期。")
+                    return True
+                print(f"  [!] 自动提交失败: {commit_err}")
+        return handle_conflict(source_branch, commit_msg)
     print(f"  [!] 合并失败: {err or out}")
     return False
 
@@ -294,7 +339,7 @@ def create_integration_branch():
 
     succeeded, failed = [], []
     for branch in selected:
-        if do_merge(branch):
+        if do_merge(branch, commit_msg=make_merge_msg(int_branch, branch)):
             succeeded.append(branch)
         else:
             failed.append(branch)
@@ -312,19 +357,18 @@ def create_integration_branch():
 
 # ─── 功能 3：同步更新集成分支 ────────────────────────────────────
 
-def get_merged_feature_branches(int_branch, base):
-    """解析集成分支的 merge commit 日志，返回曾被合并进来的开发分支名列表"""
-    _, log, _ = run_git('log', f'{base}..{int_branch}', '--merges', '--pretty=format:%s')
-    pattern = re.compile(r"Merge branch '([^']+)'")
+def get_merged_feature_branches(int_branch):
+    """通过 DREO-MERGE 标志位查找曾被合并到该集成分支的开发分支名称"""
+    _, log, _ = run_git('log', '--all', f'--grep={MERGE_TAG} {int_branch} <-',
+                        '--pretty=format:%s')
     seen, result = set(), []
     for line in log.splitlines():
-        m = pattern.search(line)
-        if m:
-            branch = m.group(1)
-            if (branch.startswith('feature_') or branch.startswith('bugfix_')) \
-                    and branch not in seen:
-                seen.add(branch)
-                result.append(branch)
+        # 格式: [DREO-MERGE] {int_branch} <- {feature_branch}
+        if '<-' in line:
+            feature = line.split('<-', 1)[-1].strip()
+            if feature and feature not in seen:
+                seen.add(feature)
+                result.append(feature)
     return result
 
 
@@ -336,30 +380,24 @@ def update_integration_branch():
         print("  [!] 没有找到集成分支（dev_ / release_ 开头）。")
         return
 
-    base = get_master_branch()
-    if not base:
-        print("  [!] 未找到 master / main 分支。")
-        return
-
     # 选择要更新的集成分支
     print("  请选择要同步更新的集成分支：")
     int_branch = int_branches[select_one(int_branches)]
 
-    # 从 git log 中解析曾被合并的开发分支
-    print(f"\n  正在分析 [{int_branch}] 的合并历史...")
-    merged_branches = get_merged_feature_branches(int_branch, base)
+    # 通过标志位查找曾被集成的开发分支
+    print(f"\n  正在查找 [{int_branch}] 的集成记录...")
+    merged_branches = get_merged_feature_branches(int_branch)
 
     if not merged_branches:
-        print("  [!] 未在该集成分支的历史中找到任何开发分支的合并记录。")
-        print(f"  [提示] 该分析基于 {base}..{int_branch} 范围内的 merge commit 消息。")
+        print("  [!] 未找到任何集成记录。")
+        print(f"  [提示] 仅识别通过本工具合并（含 {MERGE_TAG} 标志）的分支。")
         return
 
-    # 区分分支是否仍在本地存在
     local_branches = get_local_branches()
-    existing   = [b for b in merged_branches if b in local_branches]
-    missing    = [b for b in merged_branches if b not in local_branches]
+    existing = [b for b in merged_branches if b in local_branches]
+    missing  = [b for b in merged_branches if b not in local_branches]
 
-    print(f"\n  检测到以下开发分支曾被合并到 [{int_branch}]：")
+    print(f"\n  检测到以下开发分支曾被集成到 [{int_branch}]：")
     for b in merged_branches:
         tag = '' if b in local_branches else '  [本地已删除，将跳过]'
         print(f"    · {b}{tag}")
@@ -367,7 +405,6 @@ def update_integration_branch():
     if not existing:
         print("\n  [!] 所有已集成的开发分支在本地均不存在，无法同步。")
         return
-
     if missing:
         print(f"\n  [提示] {len(missing)} 个分支本地不存在，将跳过。")
 
@@ -384,7 +421,6 @@ def update_integration_branch():
 
     succeeded, failed, skipped = [], [], []
     for branch in existing:
-        # 检查该分支是否有新提交（不在集成分支中）
         _, ahead, _ = run_git('rev-list', '--count', f'{int_branch}..{branch}')
         new_commits = int(ahead) if ahead.isdigit() else 0
 
@@ -394,12 +430,11 @@ def update_integration_branch():
             continue
 
         print(f"\n  [{branch}] 有 {new_commits} 个新提交，执行合并...")
-        if do_merge(branch):
+        if do_merge(branch, commit_msg=make_merge_msg(int_branch, branch)):
             succeeded.append(branch)
         else:
             failed.append(branch)
 
-    # 结果汇总
     print()
     sep()
     print("  同步结果汇总：")
@@ -412,7 +447,111 @@ def update_integration_branch():
     print(f"\n  当前所在集成分支: {get_current_branch()}")
 
 
-# ─── 功能 4：合并发布分支回 master ───────────────────────────────
+# ─── 功能 4：删除本地分支 ────────────────────────────────────────
+
+def delete_local_branches():
+    header("删除本地分支")
+
+    all_branches = get_local_branches()
+    current = get_current_branch()
+    base = get_master_branch()
+
+    # 排除当前分支和 master/main
+    protected = {current, base}
+    deletable = [b for b in all_branches if b not in protected]
+
+    if not deletable:
+        print("  [!] 没有可删除的分支。")
+        print(f"  [提示] 当前分支 [{current}] 和 [{base}] 受保护，不可删除。")
+        return
+
+    # 按类型分组展示，方便选择
+    feature_bs = [b for b in deletable if b.startswith('feature_') or b.startswith('bugfix_')]
+    int_bs     = [b for b in deletable if b.startswith('dev_') or b.startswith('release_')]
+    other_bs   = [b for b in deletable if b not in feature_bs and b not in int_bs]
+
+    # 按分组顺序构建带编号的列表，组间插入标题
+    ordered = []
+    groups = [
+        ('开发分支', sort_branches_by_date(feature_bs, limit=len(feature_bs))),
+        ('集成分支', sort_branches_by_date(int_bs,     limit=len(int_bs))),
+        ('其他分支', other_bs),
+    ]
+    print()
+    for group_name, branches in groups:
+        if not branches:
+            continue
+        print(f"  ── {group_name} {'─' * (36 - len(group_name))}")
+        for b in branches:
+            ordered.append(b)
+            print(f"  {len(ordered):2}. {b}")
+
+    print(f"\n  [提示] 当前分支 [{current}] 和 [{base}] 受保护，不在列表中。")
+    print("  选择要删除的分支（多个用逗号分隔，all=全选）")
+    selected_indices = []
+    while True:
+        raw = input("  > ").strip()
+        if raw.lower() == 'all':
+            selected_indices = list(range(len(ordered)))
+            break
+        parts = [p.strip() for p in raw.split(',')]
+        indices, valid = [], True
+        for p in parts:
+            if p.isdigit() and 1 <= int(p) <= len(ordered):
+                idx = int(p) - 1
+                if idx not in indices:
+                    indices.append(idx)
+            else:
+                print(f"  无效输入: '{p}'，请重新输入。")
+                valid = False
+                break
+        if valid and indices:
+            selected_indices = indices
+            break
+        elif valid:
+            print("  请至少选择一个选项。")
+    selected = [ordered[i] for i in selected_indices]
+
+    print(f"\n  将删除以下 {len(selected)} 个本地分支：")
+    for b in selected:
+        print(f"    · {b}")
+    print("\n  [!] 此操作不可恢复，请确认分支代码已合并或不再需要。")
+    if not confirm("确认删除？"):
+        print("  已取消。")
+        return
+
+    succeeded, failed = [], []
+    for branch in selected:
+        # 先尝试安全删除（-d），若分支未合并则提示强制
+        ok, _, err = run_git('branch', '-d', branch)
+        if ok:
+            succeeded.append(branch)
+            print(f"  [✓] 已删除: {branch}")
+        else:
+            # 分支有未合并提交，询问是否强制删除
+            print(f"\n  [!] [{branch}] 包含未合并的提交，无法安全删除。")
+            if confirm(f"强制删除 [{branch}]？（提交将丢失）"):
+                ok2, _, err2 = run_git('branch', '-D', branch)
+                if ok2:
+                    succeeded.append(branch)
+                    print(f"  [✓] 已强制删除: {branch}")
+                else:
+                    failed.append(branch)
+                    print(f"  [✗] 删除失败: {err2}")
+            else:
+                failed.append(branch)
+                print(f"  [~] 已跳过: {branch}")
+
+    print()
+    sep()
+    print("  删除结果汇总：")
+    if succeeded:
+        print(f"  [✓] 已删除 ({len(succeeded)}): " + ", ".join(succeeded))
+    if failed:
+        print(f"  [✗] 跳过   ({len(failed)}): " + ", ".join(failed))
+
+
+# ─── 功能 5：合并发布分支回 master ───────────────────────────────
 
 def merge_to_master():
     header("合并发布分支回 master（基线写入）")
@@ -473,12 +612,14 @@ def main():
     print("═" * 52)
 
     check_git_repo()
+    check_rerere()
 
     menu = {
         '1': ('创建开发分支（feature / bugfix）', create_feature_branch),
         '2': ('创建集成分支（合并开发分支）', create_integration_branch),
         '3': ('同步更新集成分支（重新合并已集成的开发分支）', update_integration_branch),
-        '4': ('合并发布分支回 master（基线写入）', merge_to_master),
+        '4': ('删除本地分支（多选）', delete_local_branches),
+        '5': ('合并发布分支回 master（基线写入）', merge_to_master),
         '0': ('退出', None),
     }
 
@@ -486,7 +627,7 @@ def main():
         show_status()
         sep()
         print("  主菜单：")
-        for key in ['1', '2', '3', '4', '0']:
+        for key in ['1', '2', '3', '4', '5', '0']:
             print(f"  {key}. {menu[key][0]}")
         sep()
 
@@ -499,7 +640,7 @@ def main():
             print()
             menu[choice][1]()
         else:
-            print("  无效输入，请输入 0-4。")
+            print("  无效输入，请输入 0-5。")
 
         input("\n  按回车键返回主菜单...")
 
