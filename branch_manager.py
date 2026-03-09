@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """
-AoneFlow Git 分支管理工具
-基于阿里巴巴 AoneFlow 分支模型
-分支结构: feature/bugfix + n*release + master
+Dreo 分支管理工具
 """
 
 import subprocess
 import sys
+from datetime import date
+
+
+def today_str():
+    return date.today().strftime('%Y%m%d')
 
 
 # ─── Git 基础操作 ────────────────────────────────────────────────
@@ -49,7 +52,15 @@ def get_feature_branches():
 
 def get_integration_branches():
     return [b for b in get_local_branches()
-            if b.startswith('release_') or b.startswith('test_')]
+            if b.startswith('release_') or b.startswith('dev_')]
+
+
+def sort_branches_by_date(branches, limit=10):
+    """按分支名末尾的 yyyyMMdd 日期倒序排序，最多返回 limit 条"""
+    def extract_date(b):
+        suffix = b.rsplit('_', 1)[-1]
+        return suffix if (len(suffix) == 8 and suffix.isdigit()) else '00000000'
+    return sorted(branches, key=extract_date, reverse=True)[:limit]
 
 
 def get_master_branch():
@@ -118,7 +129,7 @@ def handle_conflict(merging_branch):
     print("\n  请在另一个终端中执行以下步骤：")
     print("    1. 编辑冲突文件，删除所有 <<<<<<<, =======, >>>>>>> 标记")
     print("    2. git add <已解决的文件>")
-    print("    3. 回到此工具，选择"继续合并"")
+    print("    3. 回到此工具，选择「继续合并」")
 
     while True:
         sep()
@@ -169,10 +180,10 @@ def do_merge(source_branch):
     return False
 
 
-# ─── 功能 1：创建特性分支 ─────────────────────────────────────────
+# ─── 功能 1：创建开发分支 ─────────────────────────────────────────
 
 def create_feature_branch():
-    header("创建特性分支（从 master）")
+    header("创建开发分支（从 master）")
 
     base = get_master_branch()
     if not base:
@@ -186,15 +197,16 @@ def create_feature_branch():
 
     # 输入分支名称
     existing = get_local_branches()
+    date_suffix = today_str()
     while True:
-        name = input(f"\n  分支名称（最终: {branch_type}_<名称>）: ").strip()
+        name = input(f"\n  分支名称（最终: {branch_type}_<名称>_{date_suffix}）: ").strip()
         if not name:
             print("  名称不能为空。")
             continue
         if any(c in name for c in ' ~^:?*[\\'):
             print("  包含非法字符，请重新输入。")
             continue
-        branch_name = f"{branch_type}_{name}"
+        branch_name = f"{branch_type}_{name}_{date_suffix}"
         if branch_name in existing:
             print(f"  [!] 分支 '{branch_name}' 已存在，请换一个名称。")
             continue
@@ -218,12 +230,12 @@ def create_feature_branch():
 # ─── 功能 2：创建/更新集成分支 ───────────────────────────────────
 
 def create_integration_branch():
-    header("创建集成分支（合并特性分支）")
+    header("创建集成分支（合并开发分支）")
 
     feature_branches = get_feature_branches()
     if not feature_branches:
-        print("  [!] 没有找到特性分支（feature_ / bugfix_ 开头）。")
-        print("  请先使用功能 1 创建特性分支。")
+        print("  [!] 没有找到开发分支（feature_ / bugfix_ 开头）。")
+        print("  请先使用功能 1 创建开发分支。")
         return
 
     base = get_master_branch()
@@ -231,24 +243,25 @@ def create_integration_branch():
     # 选择集成环境
     print("  请选择集成分支用途：")
     env_idx = select_one(
-        ['test    — 测试/日常环境集成', 'release — 预发/生产环境集成'],
+        ['dev     — 测试/日常环境集成', 'release — 预发/生产环境集成'],
         "集成用途"
     )
-    env_prefix = ['test', 'release'][env_idx]
+    env_prefix = ['dev', 'release'][env_idx]
 
     # 输入版本号
+    date_suffix = today_str()
     while True:
-        version = input(f"\n  版本号或名称（将创建: {env_prefix}_<版本>）: ").strip()
+        version = input(f"\n  版本号或名称（将创建: {env_prefix}_<版本>_{date_suffix}）: ").strip()
         if version:
             break
         print("  版本号不能为空。")
 
-    int_branch = f"{env_prefix}_{version}"
+    int_branch = f"{env_prefix}_{version}_{date_suffix}"
     existing = get_local_branches()
 
     if int_branch in existing:
         print(f"\n  [提示] 分支 '{int_branch}' 已存在。")
-        if not confirm("向该分支追加合并特性分支？"):
+        if not confirm("向该分支追加合并开发分支？"):
             return
         run_git('checkout', int_branch)
     else:
@@ -263,9 +276,13 @@ def create_integration_branch():
             return
         print(f"  [✓] 已创建集成分支: {int_branch}")
 
-    # 选择要合并的特性分支
-    print(f"\n  选择要合并到 [{int_branch}] 的特性分支：")
-    selected = [feature_branches[i] for i in select_many(feature_branches)]
+    # 选择要合并的开发分支（按日期倒序，最多显示 10 条）
+    sorted_features = sort_branches_by_date(feature_branches)
+    if len(feature_branches) > 10:
+        print(f"\n  [提示] 共 {len(feature_branches)} 个开发分支，按时间倒序显示最新 10 条：")
+    else:
+        print(f"\n  选择要合并到 [{int_branch}] 的开发分支：")
+    selected = [sorted_features[i] for i in select_many(sorted_features)]
 
     print(f"\n  将合并以下分支 → [{int_branch}]：")
     for b in selected:
@@ -299,7 +316,7 @@ def merge_to_master():
 
     int_branches = get_integration_branches()
     if not int_branches:
-        print("  [!] 没有找到集成/发布分支（release_ / test_ 开头）。")
+        print("  [!] 没有找到集成/发布分支（dev_ / release_ 开头）。")
         return
 
     base = get_master_branch()
@@ -343,21 +360,20 @@ def show_status():
     features = get_feature_branches()
     integrations = get_integration_branches()
     print(f"\n  当前分支: \033[1m{current}\033[0m"
-          f"  |  特性分支: {len(features)}"
+          f"  |  开发分支: {len(features)}"
           f"  |  集成分支: {len(integrations)}")
 
 
 def main():
     print("\n" + "═" * 52)
-    print("   AoneFlow Git 分支管理工具")
-    print("   feature/bugfix  +  n×release  +  master")
+    print("   Dreo 分支管理工具")
     print("═" * 52)
 
     check_git_repo()
 
     menu = {
-        '1': ('创建特性分支（feature / bugfix）', create_feature_branch),
-        '2': ('创建 / 更新集成分支（合并特性分支）', create_integration_branch),
+        '1': ('创建开发分支（feature / bugfix）', create_feature_branch),
+        '2': ('创建 / 更新集成分支（合并开发分支）', create_integration_branch),
         '3': ('合并发布分支回 master（基线写入）', merge_to_master),
         '0': ('退出', None),
     }
