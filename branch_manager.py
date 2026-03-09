@@ -3,6 +3,7 @@
 Dreo 分支管理工具
 """
 
+import re
 import subprocess
 import sys
 from datetime import date
@@ -309,7 +310,109 @@ def create_integration_branch():
     print(f"\n  当前所在集成分支: {get_current_branch()}")
 
 
-# ─── 功能 3：合并发布分支回 master ───────────────────────────────
+# ─── 功能 3：同步更新集成分支 ────────────────────────────────────
+
+def get_merged_feature_branches(int_branch, base):
+    """解析集成分支的 merge commit 日志，返回曾被合并进来的开发分支名列表"""
+    _, log, _ = run_git('log', f'{base}..{int_branch}', '--merges', '--pretty=format:%s')
+    pattern = re.compile(r"Merge branch '([^']+)'")
+    seen, result = set(), []
+    for line in log.splitlines():
+        m = pattern.search(line)
+        if m:
+            branch = m.group(1)
+            if (branch.startswith('feature_') or branch.startswith('bugfix_')) \
+                    and branch not in seen:
+                seen.add(branch)
+                result.append(branch)
+    return result
+
+
+def update_integration_branch():
+    header("同步更新集成分支（重新合并已集成的开发分支）")
+
+    int_branches = get_integration_branches()
+    if not int_branches:
+        print("  [!] 没有找到集成分支（dev_ / release_ 开头）。")
+        return
+
+    base = get_master_branch()
+    if not base:
+        print("  [!] 未找到 master / main 分支。")
+        return
+
+    # 选择要更新的集成分支
+    print("  请选择要同步更新的集成分支：")
+    int_branch = int_branches[select_one(int_branches)]
+
+    # 从 git log 中解析曾被合并的开发分支
+    print(f"\n  正在分析 [{int_branch}] 的合并历史...")
+    merged_branches = get_merged_feature_branches(int_branch, base)
+
+    if not merged_branches:
+        print("  [!] 未在该集成分支的历史中找到任何开发分支的合并记录。")
+        print(f"  [提示] 该分析基于 {base}..{int_branch} 范围内的 merge commit 消息。")
+        return
+
+    # 区分分支是否仍在本地存在
+    local_branches = get_local_branches()
+    existing   = [b for b in merged_branches if b in local_branches]
+    missing    = [b for b in merged_branches if b not in local_branches]
+
+    print(f"\n  检测到以下开发分支曾被合并到 [{int_branch}]：")
+    for b in merged_branches:
+        tag = '' if b in local_branches else '  [本地已删除，将跳过]'
+        print(f"    · {b}{tag}")
+
+    if not existing:
+        print("\n  [!] 所有已集成的开发分支在本地均不存在，无法同步。")
+        return
+
+    if missing:
+        print(f"\n  [提示] {len(missing)} 个分支本地不存在，将跳过。")
+
+    print(f"\n  将对以上 {len(existing)} 个分支执行 re-merge，只引入新增提交。")
+    if not confirm("确认同步？"):
+        print("  已取消。")
+        return
+
+    # 切换到集成分支
+    ok, _, err = run_git('checkout', int_branch)
+    if not ok:
+        print(f"  [!] 切换到 [{int_branch}] 失败: {err}")
+        return
+
+    succeeded, failed, skipped = [], [], []
+    for branch in existing:
+        # 检查该分支是否有新提交（不在集成分支中）
+        _, ahead, _ = run_git('rev-list', '--count', f'{int_branch}..{branch}')
+        new_commits = int(ahead) if ahead.isdigit() else 0
+
+        if new_commits == 0:
+            print(f"\n  [~] [{branch}] 无新增提交，跳过。")
+            skipped.append(branch)
+            continue
+
+        print(f"\n  [{branch}] 有 {new_commits} 个新提交，执行合并...")
+        if do_merge(branch):
+            succeeded.append(branch)
+        else:
+            failed.append(branch)
+
+    # 结果汇总
+    print()
+    sep()
+    print("  同步结果汇总：")
+    if succeeded:
+        print(f"  [✓] 已同步 ({len(succeeded)}): " + ", ".join(succeeded))
+    if skipped:
+        print(f"  [~] 无变更 ({len(skipped)}): " + ", ".join(skipped))
+    if failed:
+        print(f"  [✗] 失败   ({len(failed)}): " + ", ".join(failed))
+    print(f"\n  当前所在集成分支: {get_current_branch()}")
+
+
+# ─── 功能 4：合并发布分支回 master ───────────────────────────────
 
 def merge_to_master():
     header("合并发布分支回 master（基线写入）")
@@ -373,8 +476,9 @@ def main():
 
     menu = {
         '1': ('创建开发分支（feature / bugfix）', create_feature_branch),
-        '2': ('创建 / 更新集成分支（合并开发分支）', create_integration_branch),
-        '3': ('合并发布分支回 master（基线写入）', merge_to_master),
+        '2': ('创建集成分支（合并开发分支）', create_integration_branch),
+        '3': ('同步更新集成分支（重新合并已集成的开发分支）', update_integration_branch),
+        '4': ('合并发布分支回 master（基线写入）', merge_to_master),
         '0': ('退出', None),
     }
 
@@ -382,7 +486,7 @@ def main():
         show_status()
         sep()
         print("  主菜单：")
-        for key in ['1', '2', '3', '0']:
+        for key in ['1', '2', '3', '4', '0']:
             print(f"  {key}. {menu[key][0]}")
         sep()
 
@@ -395,7 +499,7 @@ def main():
             print()
             menu[choice][1]()
         else:
-            print("  无效输入，请输入 0-3。")
+            print("  无效输入，请输入 0-4。")
 
         input("\n  按回车键返回主菜单...")
 
