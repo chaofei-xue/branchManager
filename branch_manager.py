@@ -92,23 +92,28 @@ def header(title):
 
 
 def select_one(options, prompt="请选择"):
-    """单选，返回 0-based 索引"""
+    """单选，返回 0-based 索引；输入 0 返回 None（返回上一级）"""
     for i, opt in enumerate(options, 1):
         print(f"  {i}. {opt}")
+    print("  0. 返回上一级")
     while True:
-        raw = input(f"\n{prompt} [1-{len(options)}]: ").strip()
+        raw = input(f"\n{prompt} [0-{len(options)}]: ").strip()
+        if raw == '0':
+            return None
         if raw.isdigit() and 1 <= int(raw) <= len(options):
             return int(raw) - 1
-        print(f"  无效输入，请输入 1 到 {len(options)} 之间的数字。")
+        print(f"  无效输入，请输入 0 到 {len(options)} 之间的数字。")
 
 
-def select_many(options, prompt="请选择（多个用逗号分隔，all=全选）"):
-    """多选，返回 0-based 索引列表"""
+def select_many(options, prompt="请选择（多个用逗号分隔，all=全选，0=返回）"):
+    """多选，返回 0-based 索引列表；输入 0 返回 None（返回上一级）"""
     for i, opt in enumerate(options, 1):
         print(f"  {i}. {opt}")
     print(f"\n  {prompt}")
     while True:
         raw = input("  > ").strip()
+        if raw == '0':
+            return None
         if raw.lower() == 'all':
             return list(range(len(options)))
         parts = [p.strip() for p in raw.split(',')]
@@ -227,16 +232,17 @@ def create_feature_branch():
     # 选择分支类型
     print("  请选择分支类型：")
     type_idx = select_one(['feature  — 新功能开发', 'bugfix   — 缺陷修复'], "分支类型")
+    if type_idx is None:
+        return False
     branch_type = ['feature', 'bugfix'][type_idx]
 
     # 输入分支名称
     existing = get_local_branches()
     date_suffix = today_str()
     while True:
-        name = input(f"\n  分支名称（最终: {branch_type}_<名称>_{date_suffix}）: ").strip()
+        name = input(f"\n  分支名称（最终: {branch_type}_<名称>_{date_suffix}，直接回车返回）: ").strip()
         if not name:
-            print("  名称不能为空。")
-            continue
+            return False
         if any(c in name for c in ' ~^:?*[\\'):
             print("  包含非法字符，请重新输入。")
             continue
@@ -271,14 +277,17 @@ def _merge_into_integration(int_branch, candidates, action_name="合并"):
         print(f"\n  [提示] 共 {total} 个开发分支，按时间倒序显示最新 10 条：")
     else:
         print(f"\n  选择要{action_name}到 [{int_branch}] 的开发分支：")
-    selected = [sorted_c[i] for i in select_many(sorted_c)]
+    indices = select_many(sorted_c)
+    if indices is None:
+        return False
+    selected = [sorted_c[i] for i in indices]
 
     print(f"\n  将{action_name}以下分支 → [{int_branch}]：")
     for b in selected:
         print(f"    · {b}")
     if not confirm(f"确认执行{action_name}？"):
         print("  已取消。")
-        return
+        return False
 
     run_git('checkout', int_branch)
     succeeded, failed = [], []
@@ -322,14 +331,16 @@ def create_integration_branch():
         ['dev     — 测试/日常环境集成', 'release — 预发/生产环境集成'],
         "集成用途"
     )
+    if env_idx is None:
+        return False
     env_prefix = ['dev', 'release'][env_idx]
 
     date_suffix = today_str()
     while True:
-        version = input(f"\n  版本号或名称（将创建: {env_prefix}_<版本>_{date_suffix}）: ").strip()
-        if version:
-            break
-        print("  版本号不能为空。")
+        version = input(f"\n  版本号或名称（将创建: {env_prefix}_<版本>_{date_suffix}，直接回车返回）: ").strip()
+        if not version:
+            return False
+        break
 
     int_branch = f"{env_prefix}_{version}_{date_suffix}"
     if int_branch in get_local_branches():
@@ -358,7 +369,10 @@ def add_branches_to_integration():
         return
 
     print("  请选择目标集成分支：")
-    int_branch = int_branches[select_one(int_branches)]
+    idx = select_one(int_branches)
+    if idx is None:
+        return False
+    int_branch = int_branches[idx]
 
     # 已集成的分支
     already = set(get_merged_feature_branches(int_branch))
@@ -372,7 +386,7 @@ def add_branches_to_integration():
     if already:
         print(f"\n  已集成: {', '.join(already)}")
 
-    _merge_into_integration(int_branch, candidates, action_name="添加")
+    return _merge_into_integration(int_branch, candidates, action_name="添加")
 
 
 # ─── 功能 3：同步更新集成分支 ────────────────────────────────────
@@ -406,7 +420,10 @@ def update_integration_branch():
 
     # 选择要更新的集成分支
     print("  请选择要同步更新的集成分支：")
-    int_branch = int_branches[select_one(int_branches)]
+    idx = select_one(int_branches)
+    if idx is None:
+        return False
+    int_branch = int_branches[idx]
 
     # 通过标志位查找曾被集成的开发分支
     print(f"\n  正在查找 [{int_branch}] 的集成记录...")
@@ -435,7 +452,7 @@ def update_integration_branch():
     print(f"\n  将对以上 {len(existing)} 个分支执行 re-merge，只引入新增提交。")
     if not confirm("确认同步？"):
         print("  已取消。")
-        return
+        return False
 
     # 切换到集成分支
     ok, _, err = run_git('checkout', int_branch)
@@ -516,10 +533,12 @@ def delete_branches(include_remote=False):
             print(f"  {len(ordered):2}. {b}")
 
     print(f"\n  [提示] 当前分支 [{current}] 和 [{base}] 受保护，不在列表中。")
-    print("  选择要删除的分支（多个用逗号分隔，all=全选）")
+    print("  选择要删除的分支（多个用逗号分隔，all=全选，0=返回上一级）")
     selected_indices = []
     while True:
         raw = input("  > ").strip()
+        if raw == '0':
+            return False
         if raw.lower() == 'all':
             selected_indices = list(range(len(ordered)))
             break
@@ -547,7 +566,7 @@ def delete_branches(include_remote=False):
     print("\n  [!] 此操作不可恢复，请确认分支代码已合并或不再需要。")
     if not confirm("确认删除？"):
         print("  已取消。")
-        return
+        return False
 
     succeeded, failed = [], []
     for branch in selected:
@@ -599,12 +618,15 @@ def merge_to_master():
         return
 
     print(f"  选择要合并到 [{base}] 的发布分支：")
-    release_branch = int_branches[select_one(int_branches)]
+    idx = select_one(int_branches)
+    if idx is None:
+        return False
+    release_branch = int_branches[idx]
 
     print(f"\n  操作：[{release_branch}] → [{base}]")
     if not confirm("确认执行？"):
         print("  已取消。")
-        return
+        return False
 
     # 切换到 master
     ok, _, err = run_git('checkout', base)
@@ -655,18 +677,19 @@ def run_submenu(title, items):
 
         choice = input("  请选择: ").strip()
         if choice == '0':
-            return
+            return False
         if choice in keys[:-1]:
             idx = int(choice) - 1
             print()
-            items[idx][1]()
-            input("\n  按回车键继续...")
+            result = items[idx][1]()
+            if result is not False:
+                input("\n  按回车键继续...")
         else:
             print(f"  无效输入，请输入 0-{len(items)}。")
 
 
 def menu_integration():
-    run_submenu("集成分支管理", [
+    return run_submenu("集成分支管理", [
         ("创建集成分支",                   create_integration_branch),
         ("更新集成分支（同步已集成分支新提交）", update_integration_branch),
         ("添加新的开发分支到集成分支",        add_branches_to_integration),
@@ -674,7 +697,7 @@ def menu_integration():
 
 
 def menu_delete():
-    run_submenu("删除分支", [
+    return run_submenu("删除分支", [
         ("仅本地",       lambda: delete_branches(include_remote=False)),
         ("本地 + 云端",  lambda: delete_branches(include_remote=True)),
     ])
@@ -712,8 +735,8 @@ def main():
             sys.exit(0)
         elif choice.isdigit() and 1 <= int(choice) <= len(main_items):
             print()
-            main_items[int(choice) - 1][1]()
-            if int(choice) not in (2, 4):   # 子菜单自带循环，无需额外等待
+            result = main_items[int(choice) - 1][1]()
+            if result is not False:
                 input("\n  按回车键返回主菜单...")
         else:
             print(f"  无效输入，请输入 0-{len(main_items)}。")
