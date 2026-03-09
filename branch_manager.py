@@ -412,7 +412,111 @@ def update_integration_branch():
     print(f"\n  当前所在集成分支: {get_current_branch()}")
 
 
-# ─── 功能 4：合并发布分支回 master ───────────────────────────────
+# ─── 功能 4：删除本地分支 ────────────────────────────────────────
+
+def delete_local_branches():
+    header("删除本地分支")
+
+    all_branches = get_local_branches()
+    current = get_current_branch()
+    base = get_master_branch()
+
+    # 排除当前分支和 master/main
+    protected = {current, base}
+    deletable = [b for b in all_branches if b not in protected]
+
+    if not deletable:
+        print("  [!] 没有可删除的分支。")
+        print(f"  [提示] 当前分支 [{current}] 和 [{base}] 受保护，不可删除。")
+        return
+
+    # 按类型分组展示，方便选择
+    feature_bs = [b for b in deletable if b.startswith('feature_') or b.startswith('bugfix_')]
+    int_bs     = [b for b in deletable if b.startswith('dev_') or b.startswith('release_')]
+    other_bs   = [b for b in deletable if b not in feature_bs and b not in int_bs]
+
+    # 按分组顺序构建带编号的列表，组间插入标题
+    ordered = []
+    groups = [
+        ('开发分支', sort_branches_by_date(feature_bs, limit=len(feature_bs))),
+        ('集成分支', sort_branches_by_date(int_bs,     limit=len(int_bs))),
+        ('其他分支', other_bs),
+    ]
+    print()
+    for group_name, branches in groups:
+        if not branches:
+            continue
+        print(f"  ── {group_name} {'─' * (36 - len(group_name))}")
+        for b in branches:
+            ordered.append(b)
+            print(f"  {len(ordered):2}. {b}")
+
+    print(f"\n  [提示] 当前分支 [{current}] 和 [{base}] 受保护，不在列表中。")
+    print("  选择要删除的分支（多个用逗号分隔，all=全选）")
+    selected_indices = []
+    while True:
+        raw = input("  > ").strip()
+        if raw.lower() == 'all':
+            selected_indices = list(range(len(ordered)))
+            break
+        parts = [p.strip() for p in raw.split(',')]
+        indices, valid = [], True
+        for p in parts:
+            if p.isdigit() and 1 <= int(p) <= len(ordered):
+                idx = int(p) - 1
+                if idx not in indices:
+                    indices.append(idx)
+            else:
+                print(f"  无效输入: '{p}'，请重新输入。")
+                valid = False
+                break
+        if valid and indices:
+            selected_indices = indices
+            break
+        elif valid:
+            print("  请至少选择一个选项。")
+    selected = [ordered[i] for i in selected_indices]
+
+    print(f"\n  将删除以下 {len(selected)} 个本地分支：")
+    for b in selected:
+        print(f"    · {b}")
+    print("\n  [!] 此操作不可恢复，请确认分支代码已合并或不再需要。")
+    if not confirm("确认删除？"):
+        print("  已取消。")
+        return
+
+    succeeded, failed = [], []
+    for branch in selected:
+        # 先尝试安全删除（-d），若分支未合并则提示强制
+        ok, _, err = run_git('branch', '-d', branch)
+        if ok:
+            succeeded.append(branch)
+            print(f"  [✓] 已删除: {branch}")
+        else:
+            # 分支有未合并提交，询问是否强制删除
+            print(f"\n  [!] [{branch}] 包含未合并的提交，无法安全删除。")
+            if confirm(f"强制删除 [{branch}]？（提交将丢失）"):
+                ok2, _, err2 = run_git('branch', '-D', branch)
+                if ok2:
+                    succeeded.append(branch)
+                    print(f"  [✓] 已强制删除: {branch}")
+                else:
+                    failed.append(branch)
+                    print(f"  [✗] 删除失败: {err2}")
+            else:
+                failed.append(branch)
+                print(f"  [~] 已跳过: {branch}")
+
+    print()
+    sep()
+    print("  删除结果汇总：")
+    if succeeded:
+        print(f"  [✓] 已删除 ({len(succeeded)}): " + ", ".join(succeeded))
+    if failed:
+        print(f"  [✗] 跳过   ({len(failed)}): " + ", ".join(failed))
+
+
+# ─── 功能 5：合并发布分支回 master ───────────────────────────────
 
 def merge_to_master():
     header("合并发布分支回 master（基线写入）")
@@ -478,7 +582,8 @@ def main():
         '1': ('创建开发分支（feature / bugfix）', create_feature_branch),
         '2': ('创建集成分支（合并开发分支）', create_integration_branch),
         '3': ('同步更新集成分支（重新合并已集成的开发分支）', update_integration_branch),
-        '4': ('合并发布分支回 master（基线写入）', merge_to_master),
+        '4': ('删除本地分支（多选）', delete_local_branches),
+        '5': ('合并发布分支回 master（基线写入）', merge_to_master),
         '0': ('退出', None),
     }
 
@@ -486,7 +591,7 @@ def main():
         show_status()
         sep()
         print("  主菜单：")
-        for key in ['1', '2', '3', '4', '0']:
+        for key in ['1', '2', '3', '4', '5', '0']:
             print(f"  {key}. {menu[key][0]}")
         sep()
 
@@ -499,7 +604,7 @@ def main():
             print()
             menu[choice][1]()
         else:
-            print("  无效输入，请输入 0-4。")
+            print("  无效输入，请输入 0-5。")
 
         input("\n  按回车键返回主菜单...")
 
