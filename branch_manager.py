@@ -3,7 +3,6 @@
 Dreo 分支管理工具
 """
 
-import re
 import subprocess
 import sys
 from datetime import date
@@ -339,66 +338,82 @@ def create_integration_branch():
 
 # ─── 功能 3：同步更新集成分支 ────────────────────────────────────
 
-def get_merged_feature_branches(int_branch, base):
-    """解析集成分支的 merge commit 日志，返回曾被合并进来的开发分支名列表"""
-    _, log, _ = run_git('log', f'{base}..{int_branch}', '--merges', '--pretty=format:%s')
-    pattern = re.compile(r"Merge branch '([^']+)'")
-    seen, result = set(), []
-    for line in log.splitlines():
-        m = pattern.search(line)
-        if m:
-            branch = m.group(1)
-            if (branch.startswith('feature_') or branch.startswith('bugfix_')) \
-                    and branch not in seen:
-                seen.add(branch)
-                result.append(branch)
-    return result
-
-
 def update_integration_branch():
-    header("同步更新集成分支（重新合并已集成的开发分支）")
+    header("同步更新集成分支（重新合并开发分支新提交）")
 
     int_branches = get_integration_branches()
     if not int_branches:
         print("  [!] 没有找到集成分支（dev_ / release_ 开头）。")
         return
 
-    base = get_master_branch()
-    if not base:
-        print("  [!] 未找到 master / main 分支。")
-        return
-
     # 选择要更新的集成分支
     print("  请选择要同步更新的集成分支：")
     int_branch = int_branches[select_one(int_branches)]
 
-    # 从 git log 中解析曾被合并的开发分支
-    print(f"\n  正在分析 [{int_branch}] 的合并历史...")
-    merged_branches = get_merged_feature_branches(int_branch, base)
-
-    if not merged_branches:
-        print("  [!] 未在该集成分支的历史中找到任何开发分支的合并记录。")
-        print(f"  [提示] 该分析基于 {base}..{int_branch} 范围内的 merge commit 消息。")
+    all_features = sort_branches_by_date(get_feature_branches(), limit=len(get_feature_branches()))
+    if not all_features:
+        print("  [!] 没有找到开发分支。")
         return
 
-    # 区分分支是否仍在本地存在
-    local_branches = get_local_branches()
-    existing   = [b for b in merged_branches if b in local_branches]
-    missing    = [b for b in merged_branches if b not in local_branches]
+    # 对每个开发分支统计相对于集成分支的新提交数
+    has_new, no_new = [], []
+    for b in all_features:
+        _, count_str, _ = run_git('rev-list', '--count', f'{int_branch}..{b}')
+        n = int(count_str) if count_str.isdigit() else 0
+        if n > 0:
+            has_new.append((b, n))
+        else:
+            no_new.append(b)
 
-    print(f"\n  检测到以下开发分支曾被合并到 [{int_branch}]：")
-    for b in merged_branches:
-        tag = '' if b in local_branches else '  [本地已删除，将跳过]'
-        print(f"    · {b}{tag}")
+    # 展示分支状态
+    print(f"\n  开发分支相对于 [{int_branch}] 的状态：")
+    ordered = []
+    if has_new:
+        print("\n  ── 有新提交（建议同步）─────────────────────")
+        for b, n in has_new:
+            ordered.append(b)
+            print(f"  {len(ordered):2}. {b}  [{n} 个新提交]")
+    if no_new:
+        print("\n  ── 无新提交 ─────────────────────────────────")
+        for b in no_new:
+            ordered.append(b)
+            print(f"  {len(ordered):2}. {b}  [已是最新]")
 
-    if not existing:
-        print("\n  [!] 所有已集成的开发分支在本地均不存在，无法同步。")
+    if not has_new:
+        print("\n  所有开发分支均已是最新，无需同步。")
         return
 
-    if missing:
-        print(f"\n  [提示] {len(missing)} 个分支本地不存在，将跳过。")
+    # 默认预选有新提交的分支，允许用户调整
+    default_indices = list(range(len(has_new)))
+    print(f"\n  请选择要合并的分支（默认已勾选有新提交的分支，多选用逗号分隔，all=全选）")
+    print(f"  直接回车使用默认选择 [{','.join(str(i+1) for i in default_indices)}]：")
 
-    print(f"\n  将对以上 {len(existing)} 个分支执行 re-merge，只引入新增提交。")
+    raw = input("  > ").strip()
+    if raw == '':
+        selected_indices = default_indices
+    elif raw.lower() == 'all':
+        selected_indices = list(range(len(ordered)))
+    else:
+        parts = [p.strip() for p in raw.split(',')]
+        selected_indices = []
+        valid = True
+        for p in parts:
+            if p.isdigit() and 1 <= int(p) <= len(ordered):
+                idx = int(p) - 1
+                if idx not in selected_indices:
+                    selected_indices.append(idx)
+            else:
+                print(f"  无效输入: '{p}'")
+                valid = False
+                break
+        if not valid or not selected_indices:
+            print("  已取消。")
+            return
+
+    selected = [ordered[i] for i in selected_indices]
+    print(f"\n  将合并以下分支 → [{int_branch}]：")
+    for b in selected:
+        print(f"    · {b}")
     if not confirm("确认同步？"):
         print("  已取消。")
         return
@@ -410,23 +425,19 @@ def update_integration_branch():
         return
 
     succeeded, failed, skipped = [], [], []
-    for branch in existing:
-        # 检查该分支是否有新提交（不在集成分支中）
-        _, ahead, _ = run_git('rev-list', '--count', f'{int_branch}..{branch}')
-        new_commits = int(ahead) if ahead.isdigit() else 0
-
-        if new_commits == 0:
+    for branch in selected:
+        _, count_str, _ = run_git('rev-list', '--count', f'{int_branch}..{branch}')
+        n = int(count_str) if count_str.isdigit() else 0
+        if n == 0:
             print(f"\n  [~] [{branch}] 无新增提交，跳过。")
             skipped.append(branch)
             continue
-
-        print(f"\n  [{branch}] 有 {new_commits} 个新提交，执行合并...")
+        print(f"\n  [{branch}] 有 {n} 个新提交，执行合并...")
         if do_merge(branch):
             succeeded.append(branch)
         else:
             failed.append(branch)
 
-    # 结果汇总
     print()
     sep()
     print("  同步结果汇总：")
