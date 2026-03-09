@@ -134,7 +134,15 @@ def confirm(prompt):
 
 # ─── 冲突处理 ────────────────────────────────────────────────────
 
-def handle_conflict(merging_branch):
+MERGE_TAG = '[DREO-MERGE]'
+
+
+def make_merge_msg(int_branch, feature_branch):
+    """生成带标志位的 commit 信息，用于后续追踪哪些分支被集成过"""
+    return f"{MERGE_TAG} {int_branch} <- {feature_branch}"
+
+
+def handle_conflict(merging_branch, commit_msg=None):
     """引导用户解决合并冲突，返回是否最终成功"""
     print(f"\n  [!] 合并 [{merging_branch}] 时发生冲突！")
     print("\n  请在另一个终端中执行以下步骤：")
@@ -150,7 +158,6 @@ def handle_conflict(merging_branch):
         choice = input("\n  请选择 [1/2]: ").strip()
 
         if choice == '1':
-            # 检查是否仍有未解决冲突
             _, status, _ = run_git('status', '--porcelain')
             unresolved = [l for l in status.splitlines()
                           if l[:2] in ('UU', 'AA', 'DD', 'AU', 'UA', 'DU', 'UD')]
@@ -161,7 +168,11 @@ def handle_conflict(merging_branch):
                 print("  请解决全部冲突并 git add 后再继续。")
                 continue
 
-            ok, _, err = run_git('commit', '--no-edit')
+            # 使用自定义 commit 信息（若有），否则沿用 git 默认
+            if commit_msg:
+                ok, _, err = run_git('commit', '-m', commit_msg)
+            else:
+                ok, _, err = run_git('commit', '--no-edit')
             if ok:
                 print(f"  [✓] 冲突已解决，合并完成: {merging_branch}")
                 return True
@@ -177,11 +188,18 @@ def handle_conflict(merging_branch):
             print("  请输入 1 或 2。")
 
 
-def do_merge(source_branch):
-    """将 source_branch 合并到当前分支，处理冲突。返回是否成功。"""
+def do_merge(source_branch, commit_msg=None):
+    """将 source_branch 合并到当前分支，处理冲突。返回是否成功。
+    commit_msg: 指定时覆盖 git 默认的 merge commit 信息。
+    """
     current = get_current_branch()
     print(f"\n  合并 [{source_branch}] → [{current}] ...")
-    ok, out, err = run_git('merge', '--no-ff', source_branch)
+
+    if commit_msg:
+        ok, out, err = run_git('merge', '--no-ff', '-m', commit_msg, source_branch)
+    else:
+        ok, out, err = run_git('merge', '--no-ff', source_branch)
+
     if ok:
         print(f"  [✓] 合并成功: {source_branch}")
         return True
@@ -189,20 +207,21 @@ def do_merge(source_branch):
         # 尝试让 rerere 自动应用已记录的解决方案
         _, rerere_out, _ = run_git('rerere')
         if rerere_out:
-            # rerere 有输出说明应用了记录，检查是否还有残余冲突
             _, status, _ = run_git('status', '--porcelain')
             still_conflict = [l for l in status.splitlines()
                               if l[:2] in ('UU', 'AA', 'DD', 'AU', 'UA', 'DU', 'UD')]
             if not still_conflict:
-                # 全部自动解决，暂存并提交
                 run_git('add', '-u')
-                commit_ok, _, commit_err = run_git('commit', '--no-edit')
+                if commit_msg:
+                    commit_ok, _, commit_err = run_git('commit', '-m', commit_msg)
+                else:
+                    commit_ok, _, commit_err = run_git('commit', '--no-edit')
                 if commit_ok:
                     print(f"  [✓] rerere 自动重用了历史解决方案，合并完成: {source_branch}")
                     print("  [提示] 请检查自动解决的文件是否符合预期。")
                     return True
                 print(f"  [!] 自动提交失败: {commit_err}")
-        return handle_conflict(source_branch)
+        return handle_conflict(source_branch, commit_msg)
     print(f"  [!] 合并失败: {err or out}")
     return False
 
@@ -320,7 +339,7 @@ def create_integration_branch():
 
     succeeded, failed = [], []
     for branch in selected:
-        if do_merge(branch):
+        if do_merge(branch, commit_msg=make_merge_msg(int_branch, branch)):
             succeeded.append(branch)
         else:
             failed.append(branch)
@@ -338,8 +357,23 @@ def create_integration_branch():
 
 # ─── 功能 3：同步更新集成分支 ────────────────────────────────────
 
+def get_merged_feature_branches(int_branch):
+    """通过 DREO-MERGE 标志位查找曾被合并到该集成分支的开发分支名称"""
+    _, log, _ = run_git('log', '--all', f'--grep={MERGE_TAG} {int_branch} <-',
+                        '--pretty=format:%s')
+    seen, result = set(), []
+    for line in log.splitlines():
+        # 格式: [DREO-MERGE] {int_branch} <- {feature_branch}
+        if '<-' in line:
+            feature = line.split('<-', 1)[-1].strip()
+            if feature and feature not in seen:
+                seen.add(feature)
+                result.append(feature)
+    return result
+
+
 def update_integration_branch():
-    header("同步更新集成分支（重新合并开发分支新提交）")
+    header("同步更新集成分支（重新合并已集成的开发分支）")
 
     int_branches = get_integration_branches()
     if not int_branches:
@@ -350,70 +384,31 @@ def update_integration_branch():
     print("  请选择要同步更新的集成分支：")
     int_branch = int_branches[select_one(int_branches)]
 
-    all_features = sort_branches_by_date(get_feature_branches(), limit=len(get_feature_branches()))
-    if not all_features:
-        print("  [!] 没有找到开发分支。")
+    # 通过标志位查找曾被集成的开发分支
+    print(f"\n  正在查找 [{int_branch}] 的集成记录...")
+    merged_branches = get_merged_feature_branches(int_branch)
+
+    if not merged_branches:
+        print("  [!] 未找到任何集成记录。")
+        print(f"  [提示] 仅识别通过本工具合并（含 {MERGE_TAG} 标志）的分支。")
         return
 
-    # 对每个开发分支统计相对于集成分支的新提交数
-    has_new, no_new = [], []
-    for b in all_features:
-        _, count_str, _ = run_git('rev-list', '--count', f'{int_branch}..{b}')
-        n = int(count_str) if count_str.isdigit() else 0
-        if n > 0:
-            has_new.append((b, n))
-        else:
-            no_new.append(b)
+    local_branches = get_local_branches()
+    existing = [b for b in merged_branches if b in local_branches]
+    missing  = [b for b in merged_branches if b not in local_branches]
 
-    # 展示分支状态
-    print(f"\n  开发分支相对于 [{int_branch}] 的状态：")
-    ordered = []
-    if has_new:
-        print("\n  ── 有新提交（建议同步）─────────────────────")
-        for b, n in has_new:
-            ordered.append(b)
-            print(f"  {len(ordered):2}. {b}  [{n} 个新提交]")
-    if no_new:
-        print("\n  ── 无新提交 ─────────────────────────────────")
-        for b in no_new:
-            ordered.append(b)
-            print(f"  {len(ordered):2}. {b}  [已是最新]")
+    print(f"\n  检测到以下开发分支曾被集成到 [{int_branch}]：")
+    for b in merged_branches:
+        tag = '' if b in local_branches else '  [本地已删除，将跳过]'
+        print(f"    · {b}{tag}")
 
-    if not has_new:
-        print("\n  所有开发分支均已是最新，无需同步。")
+    if not existing:
+        print("\n  [!] 所有已集成的开发分支在本地均不存在，无法同步。")
         return
+    if missing:
+        print(f"\n  [提示] {len(missing)} 个分支本地不存在，将跳过。")
 
-    # 默认预选有新提交的分支，允许用户调整
-    default_indices = list(range(len(has_new)))
-    print(f"\n  请选择要合并的分支（默认已勾选有新提交的分支，多选用逗号分隔，all=全选）")
-    print(f"  直接回车使用默认选择 [{','.join(str(i+1) for i in default_indices)}]：")
-
-    raw = input("  > ").strip()
-    if raw == '':
-        selected_indices = default_indices
-    elif raw.lower() == 'all':
-        selected_indices = list(range(len(ordered)))
-    else:
-        parts = [p.strip() for p in raw.split(',')]
-        selected_indices = []
-        valid = True
-        for p in parts:
-            if p.isdigit() and 1 <= int(p) <= len(ordered):
-                idx = int(p) - 1
-                if idx not in selected_indices:
-                    selected_indices.append(idx)
-            else:
-                print(f"  无效输入: '{p}'")
-                valid = False
-                break
-        if not valid or not selected_indices:
-            print("  已取消。")
-            return
-
-    selected = [ordered[i] for i in selected_indices]
-    print(f"\n  将合并以下分支 → [{int_branch}]：")
-    for b in selected:
-        print(f"    · {b}")
+    print(f"\n  将对以上 {len(existing)} 个分支执行 re-merge，只引入新增提交。")
     if not confirm("确认同步？"):
         print("  已取消。")
         return
@@ -425,15 +420,17 @@ def update_integration_branch():
         return
 
     succeeded, failed, skipped = [], [], []
-    for branch in selected:
-        _, count_str, _ = run_git('rev-list', '--count', f'{int_branch}..{branch}')
-        n = int(count_str) if count_str.isdigit() else 0
-        if n == 0:
+    for branch in existing:
+        _, ahead, _ = run_git('rev-list', '--count', f'{int_branch}..{branch}')
+        new_commits = int(ahead) if ahead.isdigit() else 0
+
+        if new_commits == 0:
             print(f"\n  [~] [{branch}] 无新增提交，跳过。")
             skipped.append(branch)
             continue
-        print(f"\n  [{branch}] 有 {n} 个新提交，执行合并...")
-        if do_merge(branch):
+
+        print(f"\n  [{branch}] 有 {new_commits} 个新提交，执行合并...")
+        if do_merge(branch, commit_msg=make_merge_msg(int_branch, branch)):
             succeeded.append(branch)
         else:
             failed.append(branch)
