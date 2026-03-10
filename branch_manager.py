@@ -28,6 +28,14 @@ def run_git(*args, capture=True):
         sys.exit(1)
 
 
+def ensure_git_success(ok, err, action):
+    """统一处理关键 git 操作失败场景。"""
+    if ok:
+        return True
+    print(f"  🚫 {action}失败: {err or '未知错误'}")
+    return False
+
+
 def check_git_repo():
     ok, _, _ = run_git('rev-parse', '--is-inside-work-tree')
     if not ok:
@@ -147,7 +155,12 @@ def write_tracking_commit(int_branch, branches):
     [DREO-MERGE] {int_branch} <- branch1,branch2,...
     """
     msg = f"{MERGE_TAG} {int_branch} <- {','.join(branches)}"
-    run_git('commit', '--allow-empty', '-m', msg)
+    ok, _, err = run_git('commit', '--allow-empty', '-m', msg)
+    if not ok:
+        print(f"  [提示] 集成记录提交写入失败: {err}")
+        print("  [提示] 后续“已集成分支”识别可能不完整，请检查 git 用户信息或 hook 配置。")
+        return False
+    return True
 
 
 def handle_conflict(merging_branch):
@@ -254,7 +267,9 @@ def create_feature_branch():
 
     # 切换到 base 并更新
     print(f"\n  切换到 {base}，同步最新代码...")
-    run_git('checkout', base)
+    ok, _, err = run_git('checkout', base)
+    if not ensure_git_success(ok, err, f"切换到 {base}"):
+        return
     ok, _, _ = run_git('pull', 'origin', base)
     if not ok:
         print(f"  [提示] 拉取远端失败，使用本地 {base} 继续。")
@@ -273,10 +288,7 @@ def _merge_into_integration(int_branch, candidates, action_name="合并"):
     """将 candidates 中用户选中的分支合并到 int_branch，写追踪提交。"""
     sorted_c = sort_branches_by_date(candidates, limit=len(candidates))
     total = len(candidates)
-    if total > 10:
-        print(f"\n  [提示] 共 {total} 个开发分支，按时间倒序显示最新 10 条：")
-    else:
-        print(f"\n  选择要{action_name}到 [{int_branch}] 的开发分支：")
+    print(f"\n  选择要{action_name}到 [{int_branch}] 的开发分支（共 {total} 个，已按时间倒序排序）：")
     indices = select_many(sorted_c)
     if indices is None:
         return False
@@ -289,7 +301,10 @@ def _merge_into_integration(int_branch, candidates, action_name="合并"):
         print("  已取消。")
         return False
 
-    run_git('checkout', int_branch)
+    ok, _, err = run_git('checkout', int_branch)
+    if not ensure_git_success(ok, err, f"切换到 [{int_branch}]"):
+        return False
+
     succeeded, failed = [], []
     for branch in selected:
         if do_merge(branch):
@@ -298,7 +313,7 @@ def _merge_into_integration(int_branch, candidates, action_name="合并"):
             failed.append(branch)
 
     if succeeded:
-        write_tracking_commit(int_branch, selected)
+        write_tracking_commit(int_branch, succeeded)
 
     print()
     sep()
@@ -348,7 +363,12 @@ def create_integration_branch():
         return
 
     print(f"\n  从 {base} 创建集成分支 {int_branch}...")
-    run_git('checkout', base)
+    ok, _, err = run_git('checkout', base)
+    if not ensure_git_success(ok, err, f"切换到 {base}"):
+        return
+    ok, _, _ = run_git('pull', 'origin', base)
+    if not ok:
+        print(f"  [提示] 拉取远端失败，使用本地 {base} 继续。")
     ok, _, err = run_git('checkout', '-b', int_branch)
     if not ok:
         print(f"  🚫 创建失败: {err}")
@@ -607,9 +627,9 @@ def delete_branches(include_remote=False):
 def merge_to_master():
     header("合并发布分支回 master（基线写入）")
 
-    int_branches = get_integration_branches()
-    if not int_branches:
-        print("  🚫 没有找到集成/发布分支（dev_ / release_ 开头）。")
+    release_branches = [b for b in get_integration_branches() if b.startswith('release_')]
+    if not release_branches:
+        print("  🚫 没有找到发布分支（release_ 开头）。")
         return
 
     base = get_master_branch()
@@ -618,10 +638,10 @@ def merge_to_master():
         return
 
     print(f"  选择要合并到 [{base}] 的发布分支：")
-    idx = select_one(int_branches)
+    idx = select_one(release_branches)
     if idx is None:
         return False
-    release_branch = int_branches[idx]
+    release_branch = release_branches[idx]
 
     print(f"\n  操作：[{release_branch}] → [{base}]")
     if not confirm("确认执行？"):
