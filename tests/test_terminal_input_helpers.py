@@ -14,7 +14,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-import git_branch_manager as bm
+import dreo_branch_manager as bm
 
 
 class TerminalInputHelpersTest(unittest.TestCase):
@@ -24,7 +24,7 @@ class TerminalInputHelpersTest(unittest.TestCase):
         self.assertEqual(bm.display_width("a中b"), 4)
 
     def test_wrapped_line_count_expands_for_wide_characters(self) -> None:
-        with mock.patch("git_branch_manager.shutil.get_terminal_size", return_value=mock.Mock(columns=20)):
+        with mock.patch("dreo_branch_manager.shutil.get_terminal_size", return_value=mock.Mock(columns=20)):
             self.assertEqual(bm.wrapped_line_count("  > test"), 1)
             self.assertEqual(bm.wrapped_line_count("  > 中文中文中文中文中文"), 2)
 

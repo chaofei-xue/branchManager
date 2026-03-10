@@ -1,6 +1,6 @@
 # branchManager
 
-一个面向 Git 分支日常操作的交互式脚本，入口文件是 [git_branch_manager.py](/Users/xue/file/claude/branchManager/git_branch_manager.py)。
+一个面向 Git 分支日常操作的交互式脚本，入口文件是 [dreo_branch_manager.py](/Users/xue/file/claude/branchManager/dreo_branch_manager.py)。
 
 当前支持的主要流程：
 - 创建开发分支：`feature_*` / `bugfix_*`
@@ -16,7 +16,7 @@
 在 Git 仓库目录中执行：
 
 ```bash
-python3 /Users/xue/file/claude/branchManager/git_branch_manager.py
+python3 /Users/xue/file/claude/branchManager/dreo_branch_manager.py
 ```
 
 ## 自动化测试

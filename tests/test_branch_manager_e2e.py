@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-git_branch_manager.py 的正式端到端测试。
+dreo_branch_manager.py 的正式端到端测试。
 """
 
 from __future__ import annotations

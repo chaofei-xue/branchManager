@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-可重复执行的 git_branch_manager.py 端到端验证脚本。
+可重复执行的 dreo_branch_manager.py 端到端验证脚本。
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ DEV_351 = f"dev_3.5.1_{TEST_DATE}"
 
 sys.path.insert(0, str(ROOT))
 
-import git_branch_manager as bm
+import dreo_branch_manager as bm
 
 
 def git(*args: str, check: bool = True) -> str:
