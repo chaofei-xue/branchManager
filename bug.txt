@@ -1,7 +1,0 @@
-[P1] 集成记录会把“合并失败的分支”也写进去。_merge_into_integration() 明明已经区分了 succeeded/failed，但真正写追踪提交时传的是 selected 而不是 succeeded，见 branch_manager.py (line 300) 和 branch_manager.py (line 301)。这会直接污染后续 get_merged_feature_branches() 的结果，见 branch_manager.py (line 394)。结果就是：失败分支会被误判成“已经集成过”，后面 2.3 和“同步更新”都会漏掉它。
-
-[P1] 多处 git checkout 的返回值被忽略，失败后脚本还会继续执行，可能在错误的分支上操作。典型位置是 branch_manager.py (line 257)、branch_manager.py (line 258)、branch_manager.py (line 292)、branch_manager.py (line 351)。最危险的是 create_feature_branch() 里如果切到 master/main 失败，后面的 git pull origin <base> 仍会执行，这时 pull 的其实是“当前分支”，不是基线分支，行为会错得很隐蔽。
-
-[P2] “合并发布分支回 master” 实际允许选择所有集成分支，包括 dev_。筛选来源是 branch_manager.py (line 64)，而调用位置在 branch_manager.py (line 610) 和 branch_manager.py (line 620)。如果用户误选了 dev_ 分支，就会把测试集成分支直接并回主干，和菜单文案表达的意图不一致。
-
-[P2] 追踪提交失败会被静默吞掉。write_tracking_commit() 没检查 git commit --allow-empty 的结果，见 branch_manager.py (line 145) 和 branch_manager.py (line 150)。一旦用户没配 user.name/user.email、仓库状态异常，或者 commit 被别的 git hook 拒绝，主流程仍会显示成功，但后面的“已集成分支识别”会失真。

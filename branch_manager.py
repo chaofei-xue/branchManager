@@ -6,6 +6,7 @@ Dreo 分支管理工具
 import subprocess
 import sys
 from datetime import date
+from pathlib import Path
 
 
 def today_str():
@@ -85,6 +86,21 @@ def sort_branches_by_date(branches, limit=10):
 def get_master_branch():
     branches = get_local_branches()
     return 'master' if 'master' in branches else ('main' if 'main' in branches else None)
+
+
+def get_unmerged_files():
+    ok, output, _ = run_git('diff', '--name-only', '--diff-filter=U')
+    if not ok:
+        return []
+    return [line.strip() for line in output.splitlines() if line.strip()]
+
+
+def has_conflict_markers(path):
+    try:
+        text = Path(path).read_text(encoding='utf-8', errors='ignore')
+    except OSError:
+        return True
+    return any(marker in text for marker in ('<<<<<<<', '=======', '>>>>>>>'))
 
 
 # ─── 终端 UI 工具 ─────────────────────────────────────────────────
@@ -214,19 +230,21 @@ def do_merge(source_branch):
         print(f"  ✅ 合并成功: {source_branch}")
         return True
     if 'CONFLICT' in out or 'CONFLICT' in err:
-        _, rerere_out, _ = run_git('rerere')
-        if rerere_out:
-            _, status, _ = run_git('status', '--porcelain')
-            still_conflict = [l for l in status.splitlines()
-                              if l[:2] in ('UU', 'AA', 'DD', 'AU', 'UA', 'DU', 'UD')]
-            if not still_conflict:
-                run_git('add', '-u')
-                commit_ok, _, commit_err = run_git('commit', '--no-edit')
-                if commit_ok:
-                    print(f"  ✅ rerere 自动重用了历史解决方案，合并完成: {source_branch}")
-                    print("  [提示] 请检查自动解决的文件是否符合预期。")
-                    return True
-                print(f"  🚫 自动提交失败: {commit_err}")
+        run_git('rerere')
+
+        # rerere 可能发生在 merge 阶段，也可能只更新工作区而不会自动 git add。
+        for path in get_unmerged_files():
+            if not has_conflict_markers(path):
+                run_git('add', path)
+
+        still_conflict = get_unmerged_files()
+        if not still_conflict:
+            commit_ok, _, commit_err = run_git('commit', '--no-edit')
+            if commit_ok:
+                print(f"  ✅ rerere 自动重用了历史解决方案，合并完成: {source_branch}")
+                print("  [提示] 请检查自动解决的文件是否符合预期。")
+                return True
+            print(f"  🚫 自动提交失败: {commit_err}")
         return handle_conflict(source_branch)
     print(f"  🚫 合并失败: {err or out}")
     return False
