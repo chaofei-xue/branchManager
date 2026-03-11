@@ -366,10 +366,10 @@ def write_tracking_commit(int_branch, branches):
     return True
 
 
-def handle_conflict(merging_branch):
+def handle_conflict(merging_branch, action_label="合并"):
     """引导用户解决合并冲突，返回是否最终成功"""
     header("合并冲突处理", icon=UI['conflict'])
-    note(f"合并 [{merging_branch}] 时发生冲突。", 'error')
+    note(f"{action_label} [{merging_branch}] 时发生冲突。", 'error')
     print(f"\n  {icon_slot('🛠️', '36')} 请在另一个终端中执行以下步骤：")
     print("    1. 编辑冲突文件，删除所有 <<<<<<<, =======, >>>>>>> 标记")
     print("    2. git add <已解决的文件>")
@@ -394,7 +394,7 @@ def handle_conflict(merging_branch):
 
             ok, _, err = run_git('commit', '--no-edit')
             if ok:
-                note(f"冲突已解决，合并完成: {merging_branch}", 'success')
+                note(f"冲突已解决，{action_label}完成: {merging_branch}", 'success')
                 return True
             else:
                 note(f"提交失败: {err}", 'error')
@@ -402,19 +402,19 @@ def handle_conflict(merging_branch):
 
         elif choice == '2':
             run_git('merge', '--abort')
-            note(f"已放弃合并: {merging_branch}", 'warn')
+            note(f"已放弃{action_label}: {merging_branch}", 'warn')
             return False
         else:
             note("请输入 1 或 2。", 'warn')
 
 
-def do_merge(source_branch):
+def do_merge(source_branch, action_label="合并"):
     """将 source_branch 合并到当前分支，处理冲突。返回是否成功。"""
     current = get_current_branch()
-    print(f"\n  {icon_slot(UI['merge'], '36')} 合并 [{source_branch}] → [{current}] ...")
+    print(f"\n  {icon_slot(UI['merge'], '36')} {action_label} [{source_branch}] → [{current}] ...")
     ok, out, err = run_git('merge', '--no-ff', source_branch)
     if ok:
-        note(f"合并成功: {source_branch}", 'success')
+        note(f"{action_label}成功: {source_branch}", 'success')
         return True
     if 'CONFLICT' in out or 'CONFLICT' in err:
         run_git('rerere')
@@ -428,12 +428,12 @@ def do_merge(source_branch):
         if not still_conflict:
             commit_ok, _, commit_err = run_git('commit', '--no-edit')
             if commit_ok:
-                note(f"rerere 自动重用了历史解决方案，合并完成: {source_branch}", 'success')
+                note(f"rerere 自动重用了历史解决方案，{action_label}完成: {source_branch}", 'success')
                 note("请检查自动解决的文件是否符合预期。", 'tip')
                 return True
             note(f"自动提交失败: {commit_err}", 'error')
-        return handle_conflict(source_branch)
-    note(f"合并失败: {err or out}", 'error')
+        return handle_conflict(source_branch, action_label=action_label)
+    note(f"{action_label}失败: {err or out}", 'error')
     return False
 
 
@@ -474,13 +474,8 @@ def create_feature_branch():
         break
 
     # 切换到 base 并更新
-    print(f"\n  {icon_slot(UI['checkout'], '36')} 切换到 {base}，同步最新代码...")
-    ok, _, err = run_git('checkout', base)
-    if not ensure_git_success(ok, err, f"切换到 {base}"):
+    if not checkout_and_update_base(base):
         return
-    ok, _, _ = run_git('pull', 'origin', base)
-    if not ok:
-        note(f"拉取远端失败，使用本地 {base} 继续。", 'warn')
 
     # 创建新分支
     ok, _, err = run_git('checkout', '-b', branch_name)
@@ -531,6 +526,34 @@ def _merge_into_integration(int_branch, candidates, action_name="合并"):
     summary_block(f"{action_name}结果汇总", rows)
 
 
+def checkout_and_update_base(base):
+    print(f"\n  {icon_slot(UI['checkout'], '36')} 切换到 {base}，同步最新代码...")
+    ok, _, err = run_git('checkout', base)
+    if not ensure_git_success(ok, err, f"切换到 {base}"):
+        return False
+    ok, _, _ = run_git('pull', 'origin', base)
+    if not ok:
+        note(f"拉取远端失败，使用本地 {base} 继续。", 'warn')
+    return True
+
+
+def sync_base_into_integration(int_branch, base):
+    ok, _, err = run_git('checkout', int_branch)
+    if not ensure_git_success(ok, err, f"切换到 [{int_branch}]"):
+        return 'failed'
+
+    _, ahead, _ = run_git('rev-list', '--count', f'{int_branch}..{base}')
+    new_commits = int(ahead) if ahead.isdigit() else 0
+    if new_commits == 0:
+        note(f"[{int_branch}] 已包含最新 {base}，无需同步主干代码。", 'tip')
+        return 'skipped'
+
+    print(f"\n  {icon_slot(UI['sync'], '36')} 检测到 {base} 有 {new_commits} 个新提交，先同步到 [{int_branch}] ...")
+    if do_merge(base, action_label="同步主干代码"):
+        return 'success'
+    return 'failed'
+
+
 # ─── 功能 2.1：创建集成分支 ───────────────────────────────────────
 
 def create_integration_branch():
@@ -571,13 +594,9 @@ def create_integration_branch():
         note(f"分支 '{int_branch}' 已存在，请使用「2.3 添加新的开发分支」功能。", 'error')
         return
 
-    print(f"\n  {icon_slot(UI['build'], '36')} 从 {base} 创建集成分支 {int_branch}...")
-    ok, _, err = run_git('checkout', base)
-    if not ensure_git_success(ok, err, f"切换到 {base}"):
+    print(f"\n  {icon_slot(UI['build'], '36')} 从最新 {base} 创建集成分支 {int_branch}...")
+    if not checkout_and_update_base(base):
         return
-    ok, _, _ = run_git('pull', 'origin', base)
-    if not ok:
-        note(f"拉取远端失败，使用本地 {base} 继续。", 'warn')
     ok, _, err = run_git('checkout', '-b', int_branch)
     if not ok:
         note(f"创建失败: {err}", 'error')
@@ -640,7 +659,7 @@ def get_merged_feature_branches(int_branch):
 
 
 def update_integration_branch():
-    header("同步更新集成分支（重新合并已集成的开发分支）", icon=UI['sync'])
+    header("同步更新集成分支（先同步主干，再合并开发分支新增提交）", icon=UI['sync'])
 
     int_branches = get_integration_branches()
     if not int_branches:
@@ -685,11 +704,18 @@ def update_integration_branch():
         note("已取消。", 'warn')
         return False
 
-    # 切换到集成分支
-    ok, _, err = run_git('checkout', int_branch)
-    if not ok:
-        note(f"切换到 [{int_branch}] 失败: {err}", 'error')
+    base = get_master_branch()
+    if not base:
+        note("未找到 master / main 分支。", 'error')
         return
+
+    base_sync_status = sync_base_into_integration(int_branch, base)
+    if base_sync_status == 'failed':
+        summary_block("同步结果汇总", [
+            ('❌', f"主干同步失败，已停止后续开发分支同步: {base} -> {int_branch}"),
+            (UI['integration_branch'], f"当前所在集成分支: {get_current_branch()}"),
+        ])
+        return False
 
     succeeded, failed, skipped = [], [], []
     for branch in existing:
@@ -712,6 +738,10 @@ def update_integration_branch():
         write_tracking_commit(int_branch, succeeded)
 
     rows = []
+    if base_sync_status == 'success':
+        rows.append(('🔄', f"已同步最新主干代码: {base}"))
+    elif base_sync_status == 'skipped':
+        rows.append(('📌', f"主干已是最新: {base}"))
     if succeeded:
         rows.append(('✅', f"已同步 ({len(succeeded)}): " + ", ".join(succeeded)))
     if skipped:
