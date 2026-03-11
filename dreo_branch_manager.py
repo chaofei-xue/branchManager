@@ -5,10 +5,12 @@ Dreo 分支管理工具
 
 import subprocess
 import sys
-from datetime import date
+from collections import defaultdict
+from datetime import date, datetime
 import os
 import shutil
 import codecs
+import re
 import unicodedata
 from pathlib import Path
 
@@ -44,6 +46,7 @@ UI = {
     'select': '🎯',
     'status': '📊',
     'records': '📋',
+    'report': '📝',
     'pinned': '📌',
     'build': '🏗️',
     'checkout': '🔄',
@@ -274,6 +277,10 @@ def get_master_branch():
     return 'master' if 'master' in branches else ('main' if 'main' in branches else None)
 
 
+def is_integration_branch(branch):
+    return branch.startswith('dev_') or branch.startswith('release_')
+
+
 def get_unmerged_files():
     ok, output, _ = run_git('diff', '--name-only', '--diff-filter=U')
     if not ok:
@@ -349,6 +356,273 @@ def select_many(options, prompt="请选择（多个用逗号分隔，all=全选�
 
 def confirm(prompt):
     return read_input(f"{prompt} (y/n)", prefix='> ').lower() == 'y'
+
+
+# ─── 分支报告 ────────────────────────────────────────────────────
+
+REPORT_TRACKING_RE = re.compile(r"^\[DREO-MERGE\]\s+(\S+)\s+<-\s+(.+)$")
+REPORT_MERGE_RE = re.compile(r"^Merge branch '(.+?)' into (.+)$")
+
+
+def report_read_commits(*log_args):
+    ok, output, err = run_git(
+        'log',
+        *log_args,
+        '--pretty=format:%H%x1f%ad%x1f%s',
+        '--date=iso-strict',
+    )
+    if not ok:
+        raise RuntimeError(f"读取 git 日志失败: {err or output}")
+
+    commits = []
+    for line in output.splitlines():
+        sha, timestamp, subject = line.split('\x1f', 2)
+        commits.append({
+            'sha': sha,
+            'timestamp': datetime.fromisoformat(timestamp),
+            'subject': subject,
+        })
+    return commits
+
+
+def report_first_unique_commits(base, branch):
+    return report_read_commits('--reverse', '--no-merges', f'{base}..{branch}')
+
+
+def report_base_first_parent_commits(base):
+    return report_read_commits('--reverse', '--first-parent', '--no-merges', base)
+
+
+def report_merge_commits():
+    return report_read_commits('--reverse', '--merges', '--all')
+
+
+def report_tracking_commits():
+    return [
+        commit for commit in report_read_commits('--reverse', '--all')
+        if REPORT_TRACKING_RE.match(commit['subject'])
+    ]
+
+
+def collect_report_events():
+    base = get_master_branch() or get_current_branch()
+    branches = get_local_branches()
+    seen = set()
+    events = []
+
+    for commit in report_base_first_parent_commits(base):
+        key = ('base', commit['sha'])
+        if key in seen:
+            continue
+        seen.add(key)
+        events.append({
+            'timestamp': commit['timestamp'],
+            'sha': commit['sha'],
+            'kind': 'base_commit',
+            'description': f"{base} 提交 {commit['subject']}",
+            'branch': base,
+            'source': '',
+            'target': '',
+        })
+
+    for branch in branches:
+        if branch == base or is_integration_branch(branch):
+            continue
+        for index, commit in enumerate(report_first_unique_commits(base, branch)):
+            key = ('branch', branch, commit['sha'])
+            if key in seen:
+                continue
+            seen.add(key)
+            desc = (
+                f"从 {base} 拉出 {branch}，并提交 {commit['subject']}"
+                if index == 0 else
+                f"{branch} 提交 {commit['subject']}"
+            )
+            events.append({
+                'timestamp': commit['timestamp'],
+                'sha': commit['sha'],
+                'kind': 'branch_commit',
+                'description': desc,
+                'branch': branch,
+                'source': '',
+                'target': '',
+            })
+
+    for commit in report_merge_commits():
+        match = REPORT_MERGE_RE.match(commit['subject'])
+        if not match:
+            continue
+        source, target = match.groups()
+        events.append({
+            'timestamp': commit['timestamp'],
+            'sha': commit['sha'],
+            'kind': 'merge',
+            'description': f"将 {source} 合入 {target}",
+            'branch': '',
+            'source': source,
+            'target': target,
+        })
+
+    for commit in report_tracking_commits():
+        match = REPORT_TRACKING_RE.match(commit['subject'])
+        if not match:
+            continue
+        target, sources = match.groups()
+        events.append({
+            'timestamp': commit['timestamp'],
+            'sha': commit['sha'],
+            'kind': 'tracking',
+            'description': f"写入追踪提交 {commit['subject']}",
+            'branch': '',
+            'source': sources,
+            'target': target,
+        })
+
+    events.sort(key=lambda item: (item['timestamp'], item['sha'], item['kind']))
+    return events
+
+
+def mermaid_safe_period(timestamp_text):
+    return timestamp_text.replace(':', '-')
+
+
+def mermaid_safe_text(text):
+    return text.replace(':', '：')
+
+
+def build_report_sequence(events):
+    rows = []
+    for index, event in enumerate(events, 1):
+        time_text = event['timestamp'].strftime('%Y-%m-%d %H:%M:%S')
+        rows.append(f"{index}. {time_text}：{event['description']}（{event['sha'][:7]}）")
+    return rows
+
+
+def build_report_timeline(events):
+    grouped = defaultdict(list)
+    for event in events:
+        grouped[event['timestamp'].strftime('%Y-%m-%d %H:%M:%S')].append(event['description'])
+
+    lines = [
+        '```mermaid',
+        'timeline',
+        '    title 分支处理时间线',
+    ]
+    for timestamp_text, descriptions in grouped.items():
+        first = True
+        for description in descriptions:
+            period = mermaid_safe_period(timestamp_text) if first else ' ' * len(mermaid_safe_period(timestamp_text))
+            lines.append(f"    {period} : {mermaid_safe_text(description)}")
+            first = False
+    lines.append('```')
+    return '\n'.join(lines)
+
+
+def report_safe_node_id(name):
+    sanitized = re.sub(r'[^A-Za-z0-9_]', '_', name)
+    if not sanitized or sanitized[0].isdigit():
+        sanitized = f'n_{sanitized}'
+    return sanitized
+
+
+def build_report_flowchart(base, branches, events):
+    lines = [
+        '```mermaid',
+        'flowchart LR',
+    ]
+    all_nodes = [base] + [branch for branch in branches if branch != base]
+    for branch in all_nodes:
+        lines.append(f'    {report_safe_node_id(branch)}["{branch}"]')
+
+    added_edges = set()
+    for event in events:
+        if event['kind'] == 'branch_commit' and event['branch'] and event['description'].startswith(f"从 {base} 拉出 "):
+            edge = (base, event['branch'], 'create')
+            if edge not in added_edges:
+                added_edges.add(edge)
+                lines.append(f'    {report_safe_node_id(base)} -->|创建分支| {report_safe_node_id(event["branch"])}')
+        elif event['kind'] == 'merge' and event['source'] and event['target']:
+            edge = (event['source'], event['target'], event['sha'])
+            if edge not in added_edges:
+                added_edges.add(edge)
+                lines.append(
+                    f'    {report_safe_node_id(event["source"])} -->|{event["timestamp"].strftime("%H:%M:%S")} merge| {report_safe_node_id(event["target"])}'
+                )
+
+    lines.append('```')
+    return '\n'.join(lines)
+
+
+def build_tracking_section():
+    commits = report_tracking_commits()
+    if not commits:
+        return ['- 未发现 `[DREO-MERGE]` 追踪提交。']
+
+    lines = []
+    for commit in commits:
+        timestamp_text = commit['timestamp'].isoformat(sep=' ', timespec='seconds')
+        lines.append(f"- {timestamp_text}  {commit['subject']} ({commit['sha'][:7]})")
+    return lines
+
+
+def build_branch_report():
+    repo = Path.cwd().resolve()
+    base = get_master_branch() or get_current_branch()
+    current = get_current_branch()
+    branches = get_local_branches()
+    events = collect_report_events()
+    generated_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+    lines = [
+        '# Git 分支合并报告',
+        '',
+        f"- 仓库路径：`{repo}`",
+        f"- 生成时间：`{generated_at}`",
+        f"- 基线分支：`{base}`",
+        f"- 当前分支：`{current}`",
+        '',
+        '## 分支概览',
+        '',
+    ]
+    for branch in branches:
+        lines.append(f"- `{branch}`")
+
+    lines.extend([
+        '',
+        '## 推断的处理顺序',
+        '',
+    ])
+    lines.extend(build_report_sequence(events) or ['1. 未识别到可分析的提交记录。'])
+    lines.extend([
+        '',
+        '## 时间线图',
+        '',
+        build_report_timeline(events),
+        '',
+        '## 分支流转图',
+        '',
+        build_report_flowchart(base, branches, events),
+        '',
+        '## 追踪提交',
+        '',
+    ])
+    lines.extend(build_tracking_section())
+    lines.append('')
+    return '\n'.join(lines)
+
+
+def generate_branch_report(output_path=None):
+    output = Path(output_path) if output_path else Path.cwd() / 'branch_merge_report.md'
+    output.write_text(build_branch_report(), encoding='utf-8')
+    return output.resolve()
+
+
+def generate_branch_report_menu():
+    header("生成分支处理报告", icon=UI['report'])
+    note("将根据当前仓库的提交历史、merge 记录和追踪提交生成 Markdown 报告。", 'info')
+    output = generate_branch_report()
+    note(f"报告已生成: {output}", 'success')
+    note("报告包含：处理顺序、时间线图、分支流转图、追踪提交。", 'tip')
 
 
 # ─── 冲突处理 ────────────────────────────────────────────────────
@@ -980,6 +1254,7 @@ def main():
         ("创建开发分支（feature / bugfix）", create_feature_branch),
         ("集成分支管理（测试 / 生产）",      menu_integration),
         ("合并集成分支到 master",            merge_to_master),
+        ("生成分支处理报告",                 generate_branch_report_menu),
         ("删除分支",                        menu_delete),
     ]
 

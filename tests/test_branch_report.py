@@ -9,13 +9,14 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import os
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-import dreo_branch_report as report
+import dreo_branch_manager as bm
 
 
 def git(repo: Path, *args: str) -> str:
@@ -56,7 +57,12 @@ class BranchReportTest(unittest.TestCase):
             git(repo, "commit", "--allow-empty", "-m", "[DREO-MERGE] dev_1.0.0_20260311 <- feature_demo_20260311")
 
             output = repo / "report.md"
-            report.generate_report(repo, output)
+            previous = Path.cwd()
+            try:
+                os.chdir(repo)
+                bm.generate_branch_report(output)
+            finally:
+                os.chdir(previous)
             content = output.read_text(encoding="utf-8")
 
             self.assertIn("# Git 分支合并报告", content)
