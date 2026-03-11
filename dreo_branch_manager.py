@@ -222,6 +222,34 @@ def ensure_git_success(ok, err, action):
     return False
 
 
+def has_origin_remote():
+    ok, _, _ = run_git('remote', 'get-url', 'origin')
+    return ok
+
+
+def offer_push_branch(branch, set_upstream=False, prompt=None):
+    if not has_origin_remote():
+        note("未检测到 origin 远端，已跳过推送。", 'tip')
+        return False
+
+    message = prompt or f"是否立即推送 [{branch}] 到远端？"
+    if not confirm(message):
+        note("已跳过远端推送。", 'warn')
+        return False
+
+    if set_upstream:
+        ok, _, err = run_git('push', '-u', 'origin', branch)
+    else:
+        ok, _, err = run_git('push', 'origin', branch)
+
+    if ok:
+        note(f"已推送到远端: {branch}", 'success')
+        return True
+
+    note(f"推送失败: {err}", 'error')
+    return False
+
+
 def check_git_repo():
     ok, _, _ = run_git('rev-parse', '--is-inside-work-tree')
     if not ok:
@@ -758,6 +786,11 @@ def create_feature_branch():
     ok, _, err = run_git('checkout', '-b', branch_name)
     if ok:
         note(f"已创建并切换到: {branch_name}  (基于 {base})", 'success')
+        offer_push_branch(
+            branch_name,
+            set_upstream=True,
+            prompt=f"是否将新开发分支 [{branch_name}] 推送到远端？",
+        )
     else:
         note(f"创建分支失败: {err}", 'error')
 
@@ -801,6 +834,11 @@ def _merge_into_integration(int_branch, candidates, action_name="合并"):
         rows.append(('❌', f"跳过 ({len(failed)}): " + ", ".join(failed)))
     rows.append((UI['integration_branch'], f"当前所在集成分支: {get_current_branch()}"))
     summary_block(f"{action_name}结果汇总", rows)
+    return {
+        'selected': selected,
+        'succeeded': succeeded,
+        'failed': failed,
+    }
 
 
 def checkout_and_update_base(base):
@@ -880,7 +918,13 @@ def create_integration_branch():
         return
     note(f"已创建集成分支: {int_branch}", 'success')
 
-    _merge_into_integration(int_branch, feature_branches, action_name="合并")
+    result = _merge_into_integration(int_branch, feature_branches, action_name="合并")
+    if result is not False:
+        offer_push_branch(
+            int_branch,
+            set_upstream=True,
+            prompt=f"是否将集成分支 [{int_branch}] 推送到远端？",
+        )
 
 
 # ─── 功能 2.3：添加新的开发分支到集成分支 ────────────────────────
@@ -911,7 +955,13 @@ def add_branches_to_integration():
     if already:
         print(f"\n  {icon_slot(UI['pinned'], '36')} 已集成: {', '.join(already)}")
 
-    return _merge_into_integration(int_branch, candidates, action_name="添加")
+    result = _merge_into_integration(int_branch, candidates, action_name="添加")
+    if result and result['succeeded']:
+        offer_push_branch(
+            int_branch,
+            prompt=f"是否将更新后的集成分支 [{int_branch}] 推送到远端？",
+        )
+    return result
 
 
 # ─── 功能 3：同步更新集成分支 ────────────────────────────────────
@@ -1027,6 +1077,12 @@ def update_integration_branch():
         rows.append(('❌', f"失败   ({len(failed)}): " + ", ".join(failed)))
     rows.append((UI['integration_branch'], f"当前所在集成分支: {get_current_branch()}"))
     summary_block("同步结果汇总", rows)
+
+    if base_sync_status == 'success' or succeeded:
+        offer_push_branch(
+            int_branch,
+            prompt=f"是否将同步后的集成分支 [{int_branch}] 推送到远端？",
+        )
 
 
 # ─── 功能 4：删除分支 ────────────────────────────────────────────
@@ -1178,7 +1234,10 @@ def merge_to_master():
         note(f"[{release_branch}] 已成功合并到 {base}！", 'success')
         print(f"\n  {icon_slot(UI['records'], '36')} 最近提交记录：")
         print_list(log.splitlines())
-        note(f"推送到远端: git push origin {base}", 'tip')
+        offer_push_branch(
+            base,
+            prompt=f"是否将 [{base}] 的最新合并结果推送到远端？",
+        )
     else:
         note("合并失败或已放弃。", 'error')
 
