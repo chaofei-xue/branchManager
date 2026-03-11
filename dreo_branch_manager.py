@@ -254,8 +254,11 @@ def get_feature_branches():
 
 
 def get_integration_branches():
-    return [b for b in get_local_branches()
-            if b.startswith('release_') or b.startswith('dev_')]
+    branches = [
+        b for b in get_local_branches()
+        if b.startswith('release_') or b.startswith('dev_')
+    ]
+    return sort_branches_by_date(branches, limit=len(branches))
 
 
 def sort_branches_by_date(branches, limit=10):
