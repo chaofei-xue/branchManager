@@ -279,17 +279,122 @@ def get_local_branches():
     return [b.strip() for b in output.splitlines() if b.strip()]
 
 
+def get_remote_branches():
+    if not has_origin_remote():
+        return []
+    ok, output, _ = run_git('branch', '-r', '--format=%(refname:short)')
+    if not ok:
+        return []
+
+    branches = []
+    for line in output.splitlines():
+        name = line.strip()
+        if not name or name.endswith('/HEAD'):
+            continue
+        if name.startswith('origin/'):
+            branches.append(name.split('/', 1)[1])
+    return branches
+
+
+def refresh_remote_refs():
+    if not has_origin_remote():
+        return False
+    ok, _, err = run_git('fetch', 'origin', '--prune')
+    if not ok:
+        note(f"拉取远端分支引用失败，继续使用本地缓存的远端信息: {err}", 'warn')
+        return False
+    return True
+
+
+def has_local_branch(branch):
+    return branch in set(get_local_branches())
+
+
+def has_remote_branch(branch):
+    return branch in set(get_remote_branches())
+
+
+def branch_available(branch):
+    return has_local_branch(branch) or has_remote_branch(branch)
+
+
+def branch_display_name(branch):
+    if not has_local_branch(branch) and has_remote_branch(branch):
+        return f"{branch}  [远端]"
+    return branch
+
+
+def branch_location_label(branch):
+    local = has_local_branch(branch)
+    remote = has_remote_branch(branch)
+    if local and remote:
+        return '本地 + 远端'
+    if local:
+        return '仅本地'
+    if remote:
+        return '仅远端'
+    return '不存在'
+
+
+def format_branch_with_location(branch):
+    return f"{branch}  [{branch_location_label(branch)}]"
+
+
+def branch_counts(prefixes):
+    local = {
+        b for b in get_local_branches()
+        if b.startswith(prefixes)
+    }
+    remote = {
+        b for b in get_remote_branches()
+        if b.startswith(prefixes)
+    }
+    return {
+        'local': len(local),
+        'remote': len(remote),
+        'total': len(local | remote),
+    }
+
+
+def ensure_local_branch(branch, checkout=False):
+    if has_local_branch(branch):
+        if checkout:
+            ok, _, err = run_git('checkout', branch)
+            return ensure_git_success(ok, err, f"切换到 [{branch}]")
+        return True
+
+    if not has_remote_branch(branch):
+        note(f"未找到分支: {branch}", 'error')
+        return False
+
+    if checkout:
+        ok, _, err = run_git('checkout', '-b', branch, '--track', f'origin/{branch}')
+        if ensure_git_success(ok, err, f"从远端创建并切换到 [{branch}]"):
+            note(f"已从远端创建本地跟踪分支: {branch}", 'success')
+            return True
+        return False
+
+    ok, _, err = run_git('branch', '--track', branch, f'origin/{branch}')
+    if ensure_git_success(ok, err, f"从远端创建本地分支 [{branch}]"):
+        note(f"已从远端创建本地跟踪分支: {branch}", 'success')
+        return True
+    return False
+
+
 def get_feature_branches():
-    return [b for b in get_local_branches()
-            if b.startswith('feature_') or b.startswith('bugfix_')]
+    branches = {
+        b for b in get_local_branches() + get_remote_branches()
+        if b.startswith('feature_') or b.startswith('bugfix_')
+    }
+    return sort_branches_by_date(list(branches), limit=len(branches))
 
 
 def get_integration_branches():
-    branches = [
-        b for b in get_local_branches()
+    branches = {
+        b for b in get_local_branches() + get_remote_branches()
         if b.startswith('release_') or b.startswith('dev_')
-    ]
-    return sort_branches_by_date(branches, limit=len(branches))
+    }
+    return sort_branches_by_date(list(branches), limit=len(branches))
 
 
 def sort_branches_by_date(branches, limit=10):
@@ -301,7 +406,7 @@ def sort_branches_by_date(branches, limit=10):
 
 
 def get_master_branch():
-    branches = get_local_branches()
+    branches = set(get_local_branches() + get_remote_branches())
     return 'master' if 'master' in branches else ('main' if 'main' in branches else None)
 
 
@@ -746,6 +851,7 @@ def do_merge(source_branch, action_label="合并"):
 
 def create_feature_branch():
     header("创建开发分支（从 master）", icon=UI['create_feature'])
+    refresh_remote_refs()
 
     base = get_master_branch()
     if not base:
@@ -760,7 +866,6 @@ def create_feature_branch():
     branch_type = ['feature', 'bugfix'][type_idx]
 
     # 输入分支名称
-    existing = get_local_branches()
     date_suffix = today_str()
     while True:
         name = read_text_input(
@@ -773,10 +878,16 @@ def create_feature_branch():
             note("包含非法字符，请重新输入。", 'warn')
             continue
         branch_name = f"{branch_type}_{name}_{date_suffix}"
-        if branch_name in existing:
+        if has_local_branch(branch_name):
             note(f"分支 '{branch_name}' 已存在，请换一个名称。", 'error')
             continue
         break
+
+    if has_remote_branch(branch_name):
+        note(f"检测到同名远端分支 [{branch_name}]，将直接拉取到本地。", 'tip')
+        if not ensure_local_branch(branch_name, checkout=True):
+            return
+        return
 
     # 切换到 base 并更新
     if not checkout_and_update_base(base):
@@ -802,23 +913,26 @@ def _merge_into_integration(int_branch, candidates, action_name="合并"):
     sorted_c = sort_branches_by_date(candidates, limit=len(candidates))
     total = len(candidates)
     print(f"\n  {icon_slot(UI['feature_branch'], '36')} 选择要{action_name}到 [{int_branch}] 的开发分支（共 {total} 个，已按时间倒序排序）：")
-    indices = select_many(sorted_c)
+    display_options = [branch_display_name(branch) for branch in sorted_c]
+    indices = select_many(display_options)
     if indices is None:
         return False
     selected = [sorted_c[i] for i in indices]
 
     print(f"\n  {icon_slot(UI['merge'], '36')} 将{action_name}以下分支 → [{int_branch}]：")
-    print_list(selected)
+    print_list([branch_display_name(branch) for branch in selected])
     if not confirm(f"确认执行{action_name}？"):
         note("已取消。", 'warn')
         return False
 
-    ok, _, err = run_git('checkout', int_branch)
-    if not ensure_git_success(ok, err, f"切换到 [{int_branch}]"):
+    if not ensure_local_branch(int_branch, checkout=True):
         return False
 
     succeeded, failed = [], []
     for branch in selected:
+        if not ensure_local_branch(branch):
+            failed.append(branch)
+            continue
         if do_merge(branch):
             succeeded.append(branch)
         else:
@@ -843,8 +957,7 @@ def _merge_into_integration(int_branch, candidates, action_name="合并"):
 
 def checkout_and_update_base(base):
     print(f"\n  {icon_slot(UI['checkout'], '36')} 切换到 {base}，同步最新代码...")
-    ok, _, err = run_git('checkout', base)
-    if not ensure_git_success(ok, err, f"切换到 {base}"):
+    if not ensure_local_branch(base, checkout=True):
         return False
     ok, _, _ = run_git('pull', 'origin', base)
     if not ok:
@@ -873,6 +986,7 @@ def sync_base_into_integration(int_branch, base):
 
 def create_integration_branch():
     header("2.1  创建集成分支", icon=UI['create_integration'])
+    refresh_remote_refs()
 
     feature_branches = get_feature_branches()
     if not feature_branches:
@@ -905,8 +1019,20 @@ def create_integration_branch():
         break
 
     int_branch = f"{env_prefix}_{version}_{date_suffix}"
-    if int_branch in get_local_branches():
+    if has_local_branch(int_branch):
         note(f"分支 '{int_branch}' 已存在，请使用「2.3 添加新的开发分支」功能。", 'error')
+        return
+
+    if has_remote_branch(int_branch):
+        note(f"检测到同名远端集成分支 [{int_branch}]，将直接拉取到本地继续操作。", 'tip')
+        if not ensure_local_branch(int_branch, checkout=True):
+            return
+        result = _merge_into_integration(int_branch, feature_branches, action_name="合并")
+        if result and result['succeeded']:
+            offer_push_branch(
+                int_branch,
+                prompt=f"是否将更新后的集成分支 [{int_branch}] 推送到远端？",
+            )
         return
 
     print(f"\n  {icon_slot(UI['build'], '36')} 从最新 {base} 创建集成分支 {int_branch}...")
@@ -931,6 +1057,7 @@ def create_integration_branch():
 
 def add_branches_to_integration():
     header("2.3  添加新的开发分支到集成分支", icon='➕')
+    refresh_remote_refs()
 
     int_branches = get_integration_branches()
     if not int_branches:
@@ -938,7 +1065,7 @@ def add_branches_to_integration():
         return
 
     print(f"  {icon_slot(UI['select'], '36')} 请选择目标集成分支：")
-    idx = select_one(int_branches)
+    idx = select_one([branch_display_name(branch) for branch in int_branches])
     if idx is None:
         return False
     int_branch = int_branches[idx]
@@ -987,6 +1114,7 @@ def get_merged_feature_branches(int_branch):
 
 def update_integration_branch():
     header("同步更新集成分支（先同步主干，再合并开发分支新增提交）", icon=UI['sync'])
+    refresh_remote_refs()
 
     int_branches = get_integration_branches()
     if not int_branches:
@@ -995,7 +1123,7 @@ def update_integration_branch():
 
     # 选择要更新的集成分支
     print(f"  {icon_slot(UI['select'], '36')} 请选择要同步更新的集成分支：")
-    idx = select_one(int_branches)
+    idx = select_one([branch_display_name(branch) for branch in int_branches])
     if idx is None:
         return False
     int_branch = int_branches[idx]
@@ -1009,14 +1137,18 @@ def update_integration_branch():
         note(f"仅识别通过本工具合并（含 {MERGE_TAG} 标志）的分支。", 'tip')
         return
 
-    local_branches = get_local_branches()
-    existing = [b for b in merged_branches if b in local_branches]
-    missing  = [b for b in merged_branches if b not in local_branches]
+    existing = [b for b in merged_branches if branch_available(b)]
+    missing  = [b for b in merged_branches if not branch_available(b)]
 
     print(f"\n  {icon_slot(UI['records'], '36')} 检测到以下开发分支曾被集成到 [{int_branch}]：")
     branch_lines = []
     for b in merged_branches:
-        tag = '' if b in local_branches else ' [本地已删除，将跳过]'
+        if has_local_branch(b):
+            tag = ''
+        elif has_remote_branch(b):
+            tag = ' [仅远端存在，将先拉到本地]'
+        else:
+            tag = ' [本地与远端均不存在，将跳过]'
         branch_lines.append(f"{b}{tag}")
     print_list(branch_lines)
 
@@ -1046,6 +1178,9 @@ def update_integration_branch():
 
     succeeded, failed, skipped = [], [], []
     for branch in existing:
+        if not ensure_local_branch(branch):
+            failed.append(branch)
+            continue
         _, ahead, _ = run_git('rev-list', '--count', f'{int_branch}..{branch}')
         new_commits = int(ahead) if ahead.isdigit() else 0
 
@@ -1091,7 +1226,9 @@ def delete_branches(include_remote=False):
     mode = "本地 + 云端" if include_remote else "仅本地"
     header(f"删除分支（{mode}）", icon=UI['delete'])
 
-    all_branches = get_local_branches()
+    local_branches = set(get_local_branches())
+    remote_branches = set(get_remote_branches()) if include_remote else set()
+    all_branches = sorted(local_branches | remote_branches)
     current = get_current_branch()
     base = get_master_branch()
 
@@ -1123,7 +1260,7 @@ def delete_branches(include_remote=False):
         print(f"  {accent(UI['menu'] + ' ' + group_name)}")
         for b in branches:
             ordered.append(b)
-            print(f"  {accent(f'{len(ordered):>2}.')} {b}")
+            print(f"  {accent(f'{len(ordered):>2}.')} {format_branch_with_location(b)}")
 
     note(f"当前分支 [{current}] 和 [{base}] 受保护，不在列表中。", 'tip')
     print(f"  {icon_slot(UI['delete'], '36')} 选择要删除的分支（多个用逗号分隔，all=全选，0=返回上一级）")
@@ -1153,8 +1290,8 @@ def delete_branches(include_remote=False):
             note("请至少选择一个选项。", 'warn')
     selected = [ordered[i] for i in selected_indices]
 
-    print(f"\n  {icon_slot(UI['records'], '36')} 将删除以下 {len(selected)} 个本地分支：")
-    print_list(selected)
+    print(f"\n  {icon_slot(UI['records'], '36')} 将删除以下 {len(selected)} 个分支：")
+    print_list([format_branch_with_location(branch) for branch in selected])
     note("此操作不可恢复，请确认分支代码已合并或不再需要。", 'warn')
     if not confirm("确认删除？"):
         note("已取消。", 'warn')
@@ -1162,28 +1299,46 @@ def delete_branches(include_remote=False):
 
     succeeded, failed = [], []
     for branch in selected:
-        ok, _, err = run_git('branch', '-d', branch)
-        if not ok:
-            note(f"[{branch}] 包含未合并的提交，无法安全删除。", 'error')
-            if confirm(f"强制删除 [{branch}]？（提交将丢失）"):
-                ok, _, err = run_git('branch', '-D', branch)
+        local_deleted = False
+        remote_deleted = False
+
+        if branch in local_branches:
+            ok, _, err = run_git('branch', '-d', branch)
+            if not ok:
+                note(f"[{branch}] 包含未合并的提交，无法安全删除。", 'error')
+                if confirm(f"强制删除 [{branch}]？（提交将丢失）"):
+                    ok, _, err = run_git('branch', '-D', branch)
+                else:
+                    failed.append(branch)
+                    print(f"  {icon_slot(UI['skip'], '33')} 已跳过: {branch}")
+                    continue
+
+            if ok:
+                local_deleted = True
+                note(f"本地已删除: {branch}", 'success')
             else:
                 failed.append(branch)
-                print(f"  {icon_slot(UI['skip'], '33')} 已跳过: {branch}")
+                note(f"删除失败: {err}", 'error')
                 continue
 
-        if ok:
-            note(f"本地已删除: {branch}", 'success')
-            if include_remote:
-                rok, _, rerr = run_git('push', 'origin', '--delete', branch)
-                if rok:
-                    note(f"远端已删除: {branch}", 'success')
-                else:
-                    note(f"远端删除失败（可能不存在）: {rerr}", 'warn')
-            succeeded.append(branch)
+        if include_remote and branch in remote_branches:
+            rok, _, rerr = run_git('push', 'origin', '--delete', branch)
+            if rok:
+                remote_deleted = True
+                note(f"远端已删除: {branch}", 'success')
+            else:
+                note(f"远端删除失败: {rerr}", 'warn')
+
+        if local_deleted or remote_deleted:
+            details = []
+            if local_deleted:
+                details.append('本地')
+            if remote_deleted:
+                details.append('远端')
+            succeeded.append(f"{branch}（{' + '.join(details)}）")
         else:
             failed.append(branch)
-            note(f"删除失败: {err}", 'error')
+            note(f"删除失败: {branch}", 'error')
 
     rows = []
     if succeeded:
@@ -1197,6 +1352,7 @@ def delete_branches(include_remote=False):
 
 def merge_to_master():
     header("合并发布分支回 master（基线写入）", icon=UI['release'])
+    refresh_remote_refs()
 
     release_branches = [b for b in get_integration_branches() if b.startswith('release_')]
     if not release_branches:
@@ -1209,7 +1365,7 @@ def merge_to_master():
         return
 
     print(f"  {icon_slot(UI['select'], '36')} 选择要合并到 [{base}] 的发布分支：")
-    idx = select_one(release_branches)
+    idx = select_one([branch_display_name(branch) for branch in release_branches])
     if idx is None:
         return False
     release_branch = release_branches[idx]
@@ -1229,6 +1385,9 @@ def merge_to_master():
     if not ok:
         note(f"拉取远端失败，使用本地 {base} 继续。", 'warn')
 
+    if not ensure_local_branch(release_branch):
+        return
+
     if do_merge(release_branch):
         _, log, _ = run_git('log', '--oneline', '-5')
         note(f"[{release_branch}] 已成功合并到 {base}！", 'success')
@@ -1242,17 +1401,48 @@ def merge_to_master():
         note("合并失败或已放弃。", 'error')
 
 
+# ─── 功能 6：拉取远端分支到本地 ──────────────────────────────────
+
+def pull_remote_branch_to_local():
+    header("拉取远端分支到本地", icon='📥')
+    refresh_remote_refs()
+
+    remote_only = [
+        branch for branch in get_remote_branches()
+        if not has_local_branch(branch)
+    ]
+    remote_only = sort_branches_by_date(remote_only, limit=len(remote_only))
+
+    if not remote_only:
+        note("没有检测到仅存在于远端的分支。", 'tip')
+        return
+
+    print(f"  {icon_slot(UI['select'], '36')} 请选择要拉取到本地的远端分支：")
+    idx = select_one([branch_display_name(branch) for branch in remote_only])
+    if idx is None:
+        return False
+
+    branch = remote_only[idx]
+    print(f"\n  {icon_slot('📥', '36')} 操作：origin/{branch} → 本地 {branch}")
+    if not confirm("确认拉取并切换到该分支？"):
+        note("已取消。", 'warn')
+        return False
+
+    if ensure_local_branch(branch, checkout=True):
+        note(f"已将远端分支拉取到本地并切换到: {branch}", 'success')
+
+
 # ─── 菜单系统 ────────────────────────────────────────────────────
 
 def show_status():
     current = get_current_branch()
-    features = get_feature_branches()
-    integrations = get_integration_branches()
+    features = branch_counts(('feature_', 'bugfix_'))
+    integrations = branch_counts(('dev_', 'release_'))
     branch_text = paint(current, '1', '37')
     print()
-    print(f"  {icon_slot(UI['current_branch'], '32')} 当前分支: {branch_text}"
-          f"   {icon_slot(UI['feature_branch'], '36')} 开发分支: {len(features)}"
-          f"   {icon_slot(UI['integration_branch'], '35')} 集成分支: {len(integrations)}")
+    print(f"  {icon_slot(UI['current_branch'], '32')} 当前分支: {branch_text}\n")
+    print(f"     开发分支: {features['total']}（本地：{features['local']}，远端：{features['remote']}）")
+    print(f"     集成分支: {integrations['total']}（本地：{integrations['local']}，远端：{integrations['remote']}）")
 
 
 def run_submenu(title, items):
@@ -1312,6 +1502,7 @@ def main():
     main_items = [
         ("创建开发分支（feature / bugfix）", create_feature_branch),
         ("集成分支管理（测试 / 生产）",      menu_integration),
+        ("拉取远端分支到本地",               pull_remote_branch_to_local),
         ("合并集成分支到 master",            merge_to_master),
         ("生成分支处理报告",                 generate_branch_report_menu),
         ("删除分支",                        menu_delete),

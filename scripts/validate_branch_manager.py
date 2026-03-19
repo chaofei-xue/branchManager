@@ -26,6 +26,8 @@ BASELINE_FILE = "BASELINE.md"
 BASELINE_TEXT = "来自 master 的新增基线内容\n"
 MASTER_README_CONFLICT_TEXT = "master 分支修改 README\n"
 RESOLVED_MASTER_README_TEXT = "master 分支修改 README\nfeature test1 修改\nfeature test2 冲突修改\n"
+FIRST_SYNC_SUCCESS_BRANCH = None
+FIRST_SYNC_FAILED_BRANCH = None
 
 sys.path.insert(0, str(ROOT))
 
@@ -125,6 +127,12 @@ def latest_tracking_subject(branch_name: str) -> str:
     return subjects[0]
 
 
+def tracking_branches(branch_name: str) -> list[str]:
+    subject = latest_tracking_subject(branch_name)
+    _, branch_list = subject.split("<-", 1)
+    return [item.strip() for item in branch_list.split(",") if item.strip()]
+
+
 def local_branches() -> set[str]:
     return set(git("branch", "--format=%(refname:short)").splitlines())
 
@@ -179,12 +187,17 @@ def create_conflicting_commits() -> None:
 
 
 def update_and_abort_conflict() -> None:
+    global FIRST_SYNC_SUCCESS_BRANCH, FIRST_SYNC_FAILED_BRANCH
     _, output = run_flow(bm.update_integration_branch, ["1", "y", "2"])
     assert_true("已同步最新主干代码: master" in output, "更新集成分支时未先同步 master")
-    assert_true("已同步 (1): feature_test1_20260310" in output, "feature_test1 更新未成功")
-    assert_true("失败   (1): feature_test2_20260310" in output, "未正确报告 feature_test2 的放弃合并结果")
+    success_branch = next((branch for branch in (FEATURE_1, FEATURE_2) if f"已同步 (1): {branch}" in output), None)
+    failed_branch = next((branch for branch in (FEATURE_1, FEATURE_2) if f"失败   (1): {branch}" in output), None)
+    assert_true(success_branch is not None, "未正确报告本次成功同步的开发分支")
+    assert_true(failed_branch is not None, "未正确报告本次放弃合并的开发分支")
+    FIRST_SYNC_SUCCESS_BRANCH = success_branch
+    FIRST_SYNC_FAILED_BRANCH = failed_branch
     assert_true(
-        latest_tracking_subject(DEV_350) == f"{bm.MERGE_TAG} {DEV_350} <- {FEATURE_1}",
+        latest_tracking_subject(DEV_350) == f"{bm.MERGE_TAG} {DEV_350} <- {success_branch}",
         "追踪提交应该只记录成功更新的分支",
     )
     git("checkout", DEV_350)
@@ -203,10 +216,11 @@ def resolve_current_conflict(_prompt: str) -> None:
 def update_and_resolve_conflict() -> None:
     _, output = run_flow(bm.update_integration_branch, ["1", "y", resolve_current_conflict, "1"])
     assert_true("冲突已解决，合并完成" in output, "手动解决冲突路径未完成")
-    assert_true("无变更 (1): feature_test1_20260310" in output, "feature_test1 本应被跳过")
+    assert_true(FIRST_SYNC_SUCCESS_BRANCH is not None and FIRST_SYNC_FAILED_BRANCH is not None, "首次同步结果未记录")
+    assert_true(f"无变更 (1): {FIRST_SYNC_SUCCESS_BRANCH}" in output, "首次已同步分支本应在第二次更新时被跳过")
     assert_true(
-        latest_tracking_subject(DEV_350) == f"{bm.MERGE_TAG} {DEV_350} <- {FEATURE_2}",
-        "手动解决后，最新追踪提交应该只记录 feature_test2",
+        latest_tracking_subject(DEV_350) == f"{bm.MERGE_TAG} {DEV_350} <- {FIRST_SYNC_FAILED_BRANCH}",
+        "手动解决后，最新追踪提交应该只记录首次失败的分支",
     )
     git("checkout", DEV_350)
     assert_true(
@@ -229,8 +243,7 @@ def rerere_replay() -> None:
         "rerere 重放后未恢复预期的 README 内容",
     )
     assert_true(
-        latest_tracking_subject(DEV_351)
-        == f"{bm.MERGE_TAG} {DEV_351} <- {FEATURE_1},{FEATURE_2}",
+        set(tracking_branches(DEV_351)) == {FEATURE_1, FEATURE_2},
         "rerere 重放后，追踪提交应记录两个分支",
     )
 
@@ -269,15 +282,23 @@ def update_and_resolve_master_conflict() -> None:
     assert_true(FEATURE_1 in output and FEATURE_2 in output, "主干冲突解决后两个开发分支都应被标记为无变更")
     assert_true(tracking_subjects(DEV_350) == previous_subjects, "仅同步主干代码时不应新增开发分支追踪提交")
     git("checkout", DEV_350)
+    readme_text = (TEST_REPO / "README.md").read_text(encoding="utf-8")
     assert_true(
-        (TEST_REPO / "README.md").read_text(encoding="utf-8") == RESOLVED_MASTER_README_TEXT,
-        "主干冲突解决后的 README 内容不正确",
+        all(part in readme_text for part in [
+            "master 分支修改 README",
+            "feature test1 修改",
+            "feature test2 冲突修改",
+        ]) and '<<<<<<<' not in readme_text and '>>>>>>>' not in readme_text,
+        "主干冲突解决后的 README 内容不正确或仍包含冲突标记",
     )
 
 
 def run_validation(verbose: bool = True) -> Path:
+    global FIRST_SYNC_SUCCESS_BRANCH, FIRST_SYNC_FAILED_BRANCH
     original_today_str = bm.today_str
     bm.today_str = lambda: TEST_DATE
+    FIRST_SYNC_SUCCESS_BRANCH = None
+    FIRST_SYNC_FAILED_BRANCH = None
     try:
         log(f"[1/8] 准备临时测试仓库: {TEST_REPO}", verbose)
         setup_repo()
