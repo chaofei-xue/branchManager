@@ -226,6 +226,61 @@ class RemoteBranchSupportTest(unittest.TestCase):
         self.assertIn("开发分支: 2（本地：1，远端：1）", output)
         self.assertIn("集成分支: 2（本地：1，远端：1）", output)
 
+    def test_branch_lists_filter_invalid_remote_names(self) -> None:
+        valid_feature = f"feature_valid_{TEST_DATE}"
+        valid_integration = f"dev_1.0.0_{TEST_DATE}"
+
+        self.create_remote_feature(valid_feature, "valid feature")
+        self.create_remote_integration(valid_integration)
+        self.create_remote_integration("dev_automate")
+        self.create_remote_integration("release_3.1.0_hec")
+
+        with pushd(self.repo):
+            bm.refresh_remote_refs()
+            feature_branches = bm.get_feature_branches()
+            integration_branches = bm.get_integration_branches()
+
+        self.assertIn(valid_feature, feature_branches)
+        self.assertIn(valid_integration, integration_branches)
+        self.assertNotIn("dev_automate", integration_branches)
+        self.assertNotIn("release_3.1.0_hec", integration_branches)
+
+    def test_pull_remote_branch_to_local_supports_paging(self) -> None:
+        branches = [f"feature_page_{i:02d}_202603{i:02d}" for i in range(1, 22)]
+        for branch in branches:
+            self.create_remote_feature(branch, f"create {branch}")
+
+        target_branch = branches[0]
+        _, output = run_flow(
+            self.repo,
+            bm.pull_remote_branch_to_local,
+            ["__DOWN__", "21", "y"],
+        )
+
+        self.assertIn(target_branch, self.local_branches())
+        self.assertIn("当前第 1/2 页", output)
+
+    def test_delete_branches_supports_paging(self) -> None:
+        branches = [f"feature_delete_page_{i:02d}_202603{i:02d}" for i in range(1, 22)]
+        for branch in branches:
+            git(self.repo, "checkout", "master")
+            git(self.repo, "checkout", "-b", branch)
+            (self.repo / f"{branch}.txt").write_text("x\n", encoding="utf-8")
+            git(self.repo, "add", f"{branch}.txt")
+            git(self.repo, "commit", "-m", f"commit {branch}")
+
+        git(self.repo, "checkout", "master")
+        target_branch = branches[0]
+
+        _, output = run_flow(
+            self.repo,
+            lambda: bm.delete_branches(include_remote=False),
+            ["__DOWN__", "21", "", "y", "y"],
+        )
+
+        self.assertNotIn(target_branch, self.local_branches())
+        self.assertIn("当前第 1/2 页", output)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -137,6 +137,13 @@ def local_branches() -> set[str]:
     return set(git("branch", "--format=%(refname:short)").splitlines())
 
 
+def integration_choice(branch_name: str) -> str:
+    with pushd(TEST_REPO):
+        branches = bm.get_integration_branches()
+    assert_true(branch_name in branches, f"未找到集成分支: {branch_name}")
+    return str(branches.index(branch_name) + 1)
+
+
 def setup_repo() -> None:
     shutil.rmtree(TEST_REPO, ignore_errors=True)
     TEST_REPO.mkdir(parents=True, exist_ok=True)
@@ -188,7 +195,7 @@ def create_conflicting_commits() -> None:
 
 def update_and_abort_conflict() -> None:
     global FIRST_SYNC_SUCCESS_BRANCH, FIRST_SYNC_FAILED_BRANCH
-    _, output = run_flow(bm.update_integration_branch, ["1", "y", "2"])
+    _, output = run_flow(bm.update_integration_branch, [integration_choice(DEV_350), "y", "2"])
     assert_true("已同步最新主干代码: master" in output, "更新集成分支时未先同步 master")
     success_branch = next((branch for branch in (FEATURE_1, FEATURE_2) if f"已同步 (1): {branch}" in output), None)
     failed_branch = next((branch for branch in (FEATURE_1, FEATURE_2) if f"失败   (1): {branch}" in output), None)
@@ -214,7 +221,7 @@ def resolve_current_conflict(_prompt: str) -> None:
 
 
 def update_and_resolve_conflict() -> None:
-    _, output = run_flow(bm.update_integration_branch, ["1", "y", resolve_current_conflict, "1"])
+    _, output = run_flow(bm.update_integration_branch, [integration_choice(DEV_350), "y", resolve_current_conflict, "1"])
     assert_true("冲突已解决，合并完成" in output, "手动解决冲突路径未完成")
     assert_true(FIRST_SYNC_SUCCESS_BRANCH is not None and FIRST_SYNC_FAILED_BRANCH is not None, "首次同步结果未记录")
     assert_true(f"无变更 (1): {FIRST_SYNC_SUCCESS_BRANCH}" in output, "首次已同步分支本应在第二次更新时被跳过")
@@ -256,7 +263,7 @@ def advance_master_with_readme_conflict() -> None:
 
 def update_and_abort_master_conflict() -> None:
     previous_subjects = tracking_subjects(DEV_350)
-    _, output = run_flow(bm.update_integration_branch, ["1", "y", "2"])
+    _, output = run_flow(bm.update_integration_branch, [integration_choice(DEV_350), "y", "2"])
     assert_true("主干同步失败，已停止后续开发分支同步" in output, "主干冲突后未停止后续开发分支同步")
     assert_true("已放弃同步主干代码: master" in output, "主干冲突放弃路径未生效")
     assert_true(tracking_subjects(DEV_350) == previous_subjects, "仅主干同步失败时不应新增开发分支追踪提交")
@@ -276,7 +283,7 @@ def resolve_master_conflict(_prompt: str) -> None:
 
 def update_and_resolve_master_conflict() -> None:
     previous_subjects = tracking_subjects(DEV_350)
-    _, output = run_flow(bm.update_integration_branch, ["1", "y", resolve_master_conflict, "1"])
+    _, output = run_flow(bm.update_integration_branch, [integration_choice(DEV_350), "y", resolve_master_conflict, "1"])
     assert_true("冲突已解决，同步主干代码完成: master" in output, "主干冲突手动解决路径未完成")
     assert_true("无变更 (2):" in output, "主干冲突解决后应汇总 2 个无变更开发分支")
     assert_true(FEATURE_1 in output and FEATURE_2 in output, "主干冲突解决后两个开发分支都应被标记为无变更")
