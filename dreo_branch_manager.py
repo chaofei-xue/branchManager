@@ -7,6 +7,7 @@ import subprocess
 import sys
 from collections import defaultdict
 from datetime import date, datetime
+from html import escape
 import os
 import shutil
 import codecs
@@ -537,13 +538,186 @@ def report_tracking_commits():
     ]
 
 
+def report_merge_base(base, branch):
+    ok, output, _ = run_git('merge-base', base, branch)
+    return output.strip() if ok and output.strip() else None
+
+
+def report_commit_descends_from(start_sha, commit_sha):
+    if not start_sha or commit_sha == start_sha:
+        return True
+    ok, _, _ = run_git('merge-base', '--is-ancestor', start_sha, commit_sha)
+    return ok
+
+
+def report_start_commit(base, branches):
+    candidate_bases = []
+    for branch in branches:
+        if branch == base:
+            continue
+        merge_base = report_merge_base(base, branch)
+        if merge_base:
+            candidate_bases.append(merge_base)
+
+    if not candidate_bases:
+        return None
+
+    for commit in report_base_first_parent_commits(base):
+        if commit['sha'] in candidate_bases:
+            return commit
+    return None
+
+
+def report_commit_by_sha(sha):
+    commits = report_read_commits(sha, '--max-count=1')
+    return commits[0] if commits else None
+
+
+def report_current_branch_merge_commits(current, start_sha):
+    revision = f'{start_sha}..{current}' if start_sha else current
+    return report_read_commits('--reverse', '--merges', '--first-parent', revision)
+
+
+def report_current_branch_no_merge_commits(current, start_sha):
+    revision = f'{start_sha}..{current}' if start_sha else current
+    return report_read_commits('--reverse', '--first-parent', '--no-merges', revision)
+
+
+def report_tracking_commits_for_branch(branch, start_sha=None):
+    commits = report_read_commits('--reverse', branch)
+    results = []
+    for commit in commits:
+        if start_sha and not report_commit_descends_from(start_sha, commit['sha']):
+            continue
+        if REPORT_TRACKING_RE.match(commit['subject']):
+            results.append(commit)
+    return results
+
+
 def collect_report_events():
     base = get_master_branch() or get_current_branch()
+    current = get_current_branch()
     branches = get_local_branches()
+
+    if current != base:
+        start_sha = report_merge_base(base, current)
+        start_commit = report_commit_by_sha(start_sha) if start_sha else None
+        events = []
+        seen = set()
+        merged_sources = []
+
+        if start_commit:
+            events.append({
+                'timestamp': start_commit['timestamp'],
+                'sha': start_commit['sha'],
+                'kind': 'create_branch',
+                'description': f"从 {base} 拉出 {current}",
+                'branch': current,
+                'source': base,
+                'target': current,
+            })
+            seen.add(('current', start_commit['sha']))
+
+        for commit in report_current_branch_no_merge_commits(current, start_sha):
+            if REPORT_TRACKING_RE.match(commit['subject']):
+                continue
+            key = ('current', commit['sha'])
+            if key in seen:
+                continue
+            seen.add(key)
+            events.append({
+                'timestamp': commit['timestamp'],
+                'sha': commit['sha'],
+                'kind': 'branch_commit',
+                'description': f"{current} 提交 {commit['subject']}",
+                'branch': current,
+                'source': '',
+                'target': '',
+            })
+
+        for commit in report_current_branch_merge_commits(current, start_sha):
+            match = REPORT_MERGE_RE.match(commit['subject'])
+            if not match:
+                continue
+            source, target = match.groups()
+            if target != current:
+                continue
+            merged_sources.append(source)
+            events.append({
+                'timestamp': commit['timestamp'],
+                'sha': commit['sha'],
+                'kind': 'merge',
+                'description': f"将 {source} 合入 {target}",
+                'branch': '',
+                'source': source,
+                'target': target,
+            })
+
+        source_branches = []
+        for branch in merged_sources:
+            if branch not in source_branches and branch not in (base, current):
+                source_branches.append(branch)
+
+        for branch in source_branches:
+            for index, commit in enumerate(report_first_unique_commits(base, branch)):
+                key = ('branch', branch, commit['sha'])
+                if key in seen:
+                    continue
+                seen.add(key)
+                desc = (
+                    f"从 {base} 拉出 {branch}，并提交 {commit['subject']}"
+                    if index == 0 else
+                    f"{branch} 提交 {commit['subject']}"
+                )
+                events.append({
+                    'timestamp': commit['timestamp'],
+                    'sha': commit['sha'],
+                    'kind': 'branch_commit',
+                    'description': desc,
+                    'branch': branch,
+                    'source': '',
+                    'target': '',
+                })
+
+        for commit in report_tracking_commits_for_branch(current, start_sha):
+            match = REPORT_TRACKING_RE.match(commit['subject'])
+            if not match:
+                continue
+            target, sources = match.groups()
+            events.append({
+                'timestamp': commit['timestamp'],
+                'sha': commit['sha'],
+                'kind': 'tracking',
+                'description': f"写入追踪提交 {commit['subject']}",
+                'branch': '',
+                'source': sources,
+                'target': target,
+            })
+
+        events.sort(key=lambda item: (item['timestamp'], item['sha'], item['kind']))
+        return events
+
+    start_commit = report_start_commit(base, branches)
+    start_sha = start_commit['sha'] if start_commit else None
     seen = set()
     events = []
 
+    if start_commit:
+        key = ('base', start_commit['sha'])
+        seen.add(key)
+        events.append({
+            'timestamp': start_commit['timestamp'],
+            'sha': start_commit['sha'],
+            'kind': 'base_commit',
+            'description': f"{base} 提交 {start_commit['subject']}",
+            'branch': base,
+            'source': '',
+            'target': '',
+        })
+
     for commit in report_base_first_parent_commits(base):
+        if start_sha and not report_commit_descends_from(start_sha, commit['sha']):
+            continue
         key = ('base', commit['sha'])
         if key in seen:
             continue
@@ -562,6 +736,8 @@ def collect_report_events():
         if branch == base or is_integration_branch(branch):
             continue
         for index, commit in enumerate(report_first_unique_commits(base, branch)):
+            if start_sha and not report_commit_descends_from(start_sha, commit['sha']):
+                continue
             key = ('branch', branch, commit['sha'])
             if key in seen:
                 continue
@@ -582,6 +758,8 @@ def collect_report_events():
             })
 
     for commit in report_merge_commits():
+        if start_sha and not report_commit_descends_from(start_sha, commit['sha']):
+            continue
         match = REPORT_MERGE_RE.match(commit['subject'])
         if not match:
             continue
@@ -597,6 +775,8 @@ def collect_report_events():
         })
 
     for commit in report_tracking_commits():
+        if start_sha and not report_commit_descends_from(start_sha, commit['sha']):
+            continue
         match = REPORT_TRACKING_RE.match(commit['subject'])
         if not match:
             continue
@@ -686,8 +866,8 @@ def build_report_flowchart(base, branches, events):
     return '\n'.join(lines)
 
 
-def build_tracking_section():
-    commits = report_tracking_commits()
+def build_tracking_section(branch=None, start_sha=None):
+    commits = report_tracking_commits_for_branch(branch, start_sha) if branch else report_tracking_commits()
     if not commits:
         return ['- 未发现 `[DREO-MERGE]` 追踪提交。']
 
@@ -698,12 +878,13 @@ def build_tracking_section():
     return lines
 
 
-def build_branch_report():
+def build_branch_report_markdown():
     repo = Path.cwd().resolve()
     base = get_master_branch() or get_current_branch()
     current = get_current_branch()
-    branches = get_local_branches()
     events = collect_report_events()
+    branches = report_branch_order(base, get_local_branches(), events, current=current)
+    start_sha = report_merge_base(base, current) if current != base else None
     generated_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
     lines = [
@@ -722,12 +903,6 @@ def build_branch_report():
 
     lines.extend([
         '',
-        '## 推断的处理顺序',
-        '',
-    ])
-    lines.extend(build_report_sequence(events) or ['1. 未识别到可分析的提交记录。'])
-    lines.extend([
-        '',
         '## 时间线图',
         '',
         build_report_timeline(events),
@@ -739,23 +914,528 @@ def build_branch_report():
         '## 追踪提交',
         '',
     ])
-    lines.extend(build_tracking_section())
+    lines.extend(build_tracking_section(branch=current if current != base else None, start_sha=start_sha))
     lines.append('')
     return '\n'.join(lines)
 
 
+def report_branch_order(base, branches, events, current=None):
+    if current and current != base:
+        names = {base, current}
+    else:
+        names = set(branches)
+    for event in events:
+        if event['branch']:
+            names.add(event['branch'])
+        if event['source']:
+            for item in str(event['source']).split(','):
+                item = item.strip()
+                if item:
+                    names.add(item)
+        if event['target']:
+            names.add(event['target'])
+
+    ordered = []
+    if base in names:
+        ordered.append(base)
+        names.remove(base)
+
+    groups = [
+        sorted([b for b in names if b.startswith(('feature_', 'bugfix_'))]),
+        sort_branches_by_date([b for b in names if b.startswith(('dev_', 'release_'))], limit=len(names)),
+        sorted([b for b in names if b not in ordered and not b.startswith(('feature_', 'bugfix_', 'dev_', 'release_'))]),
+    ]
+    for group in groups:
+        for branch in group:
+            if branch not in ordered:
+                ordered.append(branch)
+    return ordered
+
+
+def report_event_type(event):
+    if event['kind'] == 'create_branch':
+        return 'create'
+    if event['kind'] == 'branch_commit' and event['description'].startswith('从 '):
+        return 'create'
+    return event['kind']
+
+
+def report_kind_label(event_type):
+    labels = {
+        'base_commit': '主干提交',
+        'branch_commit': '分支提交',
+        'create': '创建分支',
+        'merge': '分支合并',
+        'tracking': '追踪记录',
+    }
+    return labels.get(event_type, event_type)
+
+
+def build_report_timeline_html(events):
+    if not events:
+        return '<p class="empty">未识别到可分析的提交记录。</p>'
+
+    blocks = ['<div class="timeline">']
+    for index, event in enumerate(events, 1):
+        event_type = report_event_type(event)
+        timestamp_text = event['timestamp'].strftime('%Y-%m-%d %H:%M:%S')
+        blocks.append(
+            f'<article class="timeline-item timeline-{escape(event_type)}">'
+            f'<div class="timeline-index">{index}</div>'
+            f'<div class="timeline-body">'
+            f'<div class="timeline-meta"><span class="kind-chip">{escape(report_kind_label(event_type))}</span>'
+            f'<time>{escape(timestamp_text)}</time><span class="sha">{escape(event["sha"][:7])}</span></div>'
+            f'<div class="timeline-text">{escape(event["description"])}</div>'
+            f'</div></article>'
+        )
+    blocks.append('</div>')
+    return ''.join(blocks)
+
+
+def build_report_flow_svg(base, branches, events):
+    ordered_branches = report_branch_order(base, branches, events)
+    if not ordered_branches:
+        return '<p class="empty">无可绘制的分支信息。</p>'
+
+    graph_events = [
+        event for event in events
+        if report_event_type(event) in ('create', 'merge', 'tracking')
+    ]
+    width = max(960, 220 * len(ordered_branches))
+    row_height = 96
+    height = 140 + max(len(graph_events), 1) * row_height
+    padding_x = 110
+    branch_gap = 220
+    top_y = 78
+    lane_bottom = height - 48
+    branch_x = {
+        branch: padding_x + index * branch_gap
+        for index, branch in enumerate(ordered_branches)
+    }
+
+    svg = [
+        f'<svg class="branch-graph-svg" viewBox="0 0 {width} {height}" '
+        f'xmlns="http://www.w3.org/2000/svg" role="img" aria-label="分支流转图">',
+        '<defs>',
+        '<marker id="arrow-head" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto">',
+        '<path d="M0,0 L10,5 L0,10 z" fill="#2563eb" />',
+        '</marker>',
+        '<filter id="card-shadow" x="-20%" y="-20%" width="140%" height="140%">',
+        '<feDropShadow dx="0" dy="6" stdDeviation="8" flood-color="#0f172a" flood-opacity="0.14" />',
+        '</filter>',
+        '</defs>',
+    ]
+
+    for branch in ordered_branches:
+        x = branch_x[branch]
+        svg.append(f'<line x1="{x}" y1="{top_y}" x2="{x}" y2="{lane_bottom}" class="lane-line" />')
+        svg.append(
+            f'<rect x="{x - 78}" y="18" width="156" height="40" rx="14" class="branch-card" />'
+            f'<text x="{x}" y="43" text-anchor="middle" class="branch-card-text">{escape(branch)}</text>'
+        )
+
+    for index, event in enumerate(graph_events, 1):
+        y = top_y + index * row_height
+        event_type = report_event_type(event)
+        label = escape(event['description'])
+
+        if event_type == 'tracking':
+            target = event['target']
+            if target not in branch_x:
+                continue
+            x = branch_x[target]
+            svg.append(
+                f'<rect x="{x - 105}" y="{y - 22}" width="210" height="44" rx="12" class="tracking-card" filter="url(#card-shadow)" />'
+                f'<text x="{x}" y="{y - 3}" text-anchor="middle" class="tracking-title">追踪提交</text>'
+                f'<text x="{x}" y="{y + 14}" text-anchor="middle" class="tracking-text">{label}</text>'
+            )
+            continue
+
+        source = base if event_type == 'create' else event['source']
+        target = event['branch'] if event_type == 'create' else event['target']
+        if source not in branch_x or target not in branch_x:
+            continue
+        x1 = branch_x[source]
+        x2 = branch_x[target]
+        line_class = 'create-line' if event_type == 'create' else 'merge-line'
+        mid_x = (x1 + x2) / 2
+        text_width = min(max(200, len(event['description']) * 8), 320)
+        svg.append(f'<circle cx="{x1}" cy="{y}" r="5" class="event-dot" />')
+        svg.append(f'<circle cx="{x2}" cy="{y}" r="5" class="event-dot" />')
+        svg.append(
+            f'<line x1="{x1}" y1="{y}" x2="{x2}" y2="{y}" class="{line_class}" marker-end="url(#arrow-head)" />'
+        )
+        svg.append(
+            f'<rect x="{mid_x - text_width / 2}" y="{y - 20}" width="{text_width}" height="40" rx="12" '
+            f'class="event-label-card" filter="url(#card-shadow)" />'
+            f'<text x="{mid_x}" y="{y + 5}" text-anchor="middle" class="event-label">{label}</text>'
+        )
+
+    svg.append('</svg>')
+    return ''.join(svg)
+
+
+def build_tracking_section_html(branch=None, start_sha=None):
+    commits = report_tracking_commits_for_branch(branch, start_sha) if branch else report_tracking_commits()
+    if not commits:
+        return '<p class="empty">未发现追踪提交。</p>'
+
+    rows = ['<table class="tracking-table"><thead><tr><th>时间</th><th>提交信息</th><th>SHA</th></tr></thead><tbody>']
+    for commit in commits:
+        timestamp_text = commit['timestamp'].isoformat(sep=' ', timespec='seconds')
+        rows.append(
+            f'<tr><td>{escape(timestamp_text)}</td>'
+            f'<td>{escape(commit["subject"])}</td>'
+            f'<td><code>{escape(commit["sha"][:7])}</code></td></tr>'
+        )
+    rows.append('</tbody></table>')
+    return ''.join(rows)
+
+
+def build_branch_report_html():
+    repo = Path.cwd().resolve()
+    base = get_master_branch() or get_current_branch()
+    current = get_current_branch()
+    events = collect_report_events()
+    branches = report_branch_order(base, get_local_branches(), events, current=current)
+    start_sha = report_merge_base(base, current) if current != base else None
+    generated_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    feature_counts = branch_counts(('feature_', 'bugfix_'))
+    integration_counts = branch_counts(('dev_', 'release_'))
+
+    branch_chips = ''.join(
+        f'<span class="branch-chip">{escape(branch)}</span>' for branch in report_branch_order(base, branches, events, current=current)
+    ) or '<span class="empty">未检测到分支。</span>'
+
+    return f"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Git 分支合并报告</title>
+  <style>
+    :root {{
+      --bg: #f3f6fb;
+      --card: #ffffff;
+      --line: #d7e0ec;
+      --text: #0f172a;
+      --muted: #526072;
+      --blue: #2563eb;
+      --green: #0f9d58;
+      --orange: #f59e0b;
+      --violet: #7c3aed;
+      --shadow: 0 18px 42px rgba(15, 23, 42, 0.08);
+    }}
+    * {{ box-sizing: border-box; }}
+    body {{
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "PingFang SC", "Helvetica Neue", sans-serif;
+      background:
+        radial-gradient(circle at top left, rgba(37, 99, 235, 0.10), transparent 28%),
+        linear-gradient(180deg, #f8fbff 0%, var(--bg) 100%);
+      color: var(--text);
+    }}
+    .page {{
+      width: min(1440px, calc(100% - 48px));
+      margin: 32px auto 56px;
+    }}
+    .hero {{
+      background: linear-gradient(135deg, #0f172a, #1d4ed8);
+      color: #fff;
+      border-radius: 24px;
+      padding: 28px 32px;
+      box-shadow: var(--shadow);
+    }}
+    .hero h1 {{ margin: 0 0 12px; font-size: 34px; }}
+    .hero p {{ margin: 6px 0; color: rgba(255,255,255,0.82); }}
+    .meta-grid, .stats-grid {{
+      display: grid;
+      gap: 16px;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      margin-top: 20px;
+    }}
+    .meta-card, .stat-card, .panel {{
+      background: var(--card);
+      border: 1px solid rgba(215, 224, 236, 0.85);
+      border-radius: 22px;
+      box-shadow: var(--shadow);
+      color: var(--text);
+    }}
+    .meta-card, .stat-card {{
+      padding: 18px 20px;
+    }}
+    .meta-card .label, .stat-card .label {{
+      color: var(--muted);
+      font-size: 13px;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }}
+    .meta-card .value, .stat-card .value {{
+      margin-top: 10px;
+      font-size: 20px;
+      font-weight: 700;
+      word-break: break-all;
+    }}
+    .sections {{
+      display: grid;
+      gap: 22px;
+      margin-top: 24px;
+    }}
+    .panel {{
+      padding: 22px 24px;
+    }}
+    .panel h2 {{
+      margin: 0 0 18px;
+      font-size: 22px;
+    }}
+    .branch-chips {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+    }}
+    .branch-chip {{
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 14px;
+      border-radius: 999px;
+      background: #eaf1ff;
+      color: #1d4ed8;
+      font-weight: 600;
+    }}
+    .branch-chip::before {{
+      content: "🌿";
+      font-size: 14px;
+    }}
+    .timeline {{
+      position: relative;
+      display: grid;
+      gap: 16px;
+      padding-left: 14px;
+    }}
+    .timeline::before {{
+      content: "";
+      position: absolute;
+      left: 22px;
+      top: 8px;
+      bottom: 8px;
+      width: 2px;
+      background: linear-gradient(180deg, #93c5fd, #dbeafe);
+    }}
+    .timeline-item {{
+      position: relative;
+      display: grid;
+      grid-template-columns: 44px 1fr;
+      gap: 16px;
+      align-items: start;
+    }}
+    .timeline-index {{
+      position: relative;
+      z-index: 1;
+      display: grid;
+      place-items: center;
+      width: 44px;
+      height: 44px;
+      border-radius: 50%;
+      background: #fff;
+      border: 2px solid #bfdbfe;
+      color: var(--blue);
+      font-weight: 700;
+      box-shadow: 0 8px 18px rgba(37, 99, 235, 0.12);
+    }}
+    .timeline-body {{
+      padding: 16px 18px;
+      background: #f8fbff;
+      border: 1px solid var(--line);
+      border-radius: 18px;
+    }}
+    .timeline-meta {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      align-items: center;
+      margin-bottom: 8px;
+      color: var(--muted);
+      font-size: 13px;
+    }}
+    .kind-chip {{
+      display: inline-flex;
+      align-items: center;
+      padding: 4px 10px;
+      border-radius: 999px;
+      background: #dbeafe;
+      color: #1d4ed8;
+      font-weight: 700;
+    }}
+    .sha {{
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      background: #e2e8f0;
+      border-radius: 999px;
+      padding: 4px 10px;
+    }}
+    .timeline-text {{ line-height: 1.7; }}
+    .graph-wrap {{
+      overflow-x: auto;
+      padding-bottom: 8px;
+    }}
+    .branch-graph-svg {{
+      width: 100%;
+      min-width: 960px;
+      background: linear-gradient(180deg, #f8fbff, #ffffff);
+      border-radius: 20px;
+      border: 1px solid var(--line);
+    }}
+    .branch-card {{
+      fill: #eaf1ff;
+      stroke: #93c5fd;
+      stroke-width: 1.5;
+    }}
+    .branch-card-text {{
+      fill: #0f172a;
+      font-size: 13px;
+      font-weight: 700;
+    }}
+    .lane-line {{
+      stroke: #cbd5e1;
+      stroke-width: 3;
+      stroke-dasharray: 8 8;
+    }}
+    .event-dot {{
+      fill: #2563eb;
+    }}
+    .create-line {{
+      stroke: #0f9d58;
+      stroke-width: 4;
+    }}
+    .merge-line {{
+      stroke: #2563eb;
+      stroke-width: 4;
+    }}
+    .event-label-card {{
+      fill: #ffffff;
+      stroke: #d7e0ec;
+      stroke-width: 1.2;
+    }}
+    .event-label {{
+      fill: #0f172a;
+      font-size: 12px;
+      font-weight: 600;
+    }}
+    .tracking-card {{
+      fill: #f5f3ff;
+      stroke: #c4b5fd;
+      stroke-width: 1.2;
+    }}
+    .tracking-title {{
+      fill: #6d28d9;
+      font-size: 12px;
+      font-weight: 700;
+    }}
+    .tracking-text {{
+      fill: #4c1d95;
+      font-size: 11px;
+      font-weight: 600;
+    }}
+    .tracking-table {{
+      width: 100%;
+      border-collapse: collapse;
+      overflow: hidden;
+      border-radius: 16px;
+      border: 1px solid var(--line);
+    }}
+    .tracking-table th, .tracking-table td {{
+      padding: 14px 16px;
+      text-align: left;
+      border-bottom: 1px solid var(--line);
+      vertical-align: top;
+    }}
+    .tracking-table thead {{
+      background: #eff6ff;
+    }}
+    .tracking-table tbody tr:nth-child(even) {{
+      background: #fafcff;
+    }}
+    .empty {{
+      color: var(--muted);
+      margin: 0;
+    }}
+    @media (max-width: 900px) {{
+      .page {{ width: min(100% - 24px, 1440px); margin: 16px auto 32px; }}
+      .hero {{ padding: 22px 20px; border-radius: 20px; }}
+      .hero h1 {{ font-size: 28px; }}
+      .panel {{ padding: 18px; }}
+    }}
+  </style>
+</head>
+<body>
+  <main class="page">
+    <section class="hero">
+      <h1>Git 分支合并报告</h1>
+      <p>基于当前仓库的提交历史、merge 记录和追踪提交自动生成。</p>
+      <div class="meta-grid">
+        <div class="meta-card"><div class="label">仓库路径</div><div class="value">{escape(str(repo))}</div></div>
+        <div class="meta-card"><div class="label">生成时间</div><div class="value">{escape(generated_at)}</div></div>
+        <div class="meta-card"><div class="label">基线分支</div><div class="value">{escape(base)}</div></div>
+        <div class="meta-card"><div class="label">当前分支</div><div class="value">{escape(current)}</div></div>
+      </div>
+    </section>
+
+    <section class="stats-grid">
+      <article class="stat-card"><div class="label">开发分支</div><div class="value">{feature_counts['total']}</div><div class="label">本地 {feature_counts['local']} / 远端 {feature_counts['remote']}</div></article>
+      <article class="stat-card"><div class="label">集成分支</div><div class="value">{integration_counts['total']}</div><div class="label">本地 {integration_counts['local']} / 远端 {integration_counts['remote']}</div></article>
+      <article class="stat-card"><div class="label">事件数</div><div class="value">{len(events)}</div><div class="label">按时间顺序推断</div></article>
+      <article class="stat-card"><div class="label">追踪提交</div><div class="value">{len(report_tracking_commits())}</div><div class="label">含 [DREO-MERGE]</div></article>
+    </section>
+
+    <section class="sections">
+      <article class="panel">
+        <h2>分支概览</h2>
+        <div class="branch-chips">{branch_chips}</div>
+      </article>
+
+      <article class="panel">
+        <h2>时间线</h2>
+        {build_report_timeline_html(events)}
+      </article>
+
+      <article class="panel">
+        <h2>分支流转图</h2>
+        <div class="graph-wrap">{build_report_flow_svg(base, branches, events)}</div>
+      </article>
+
+      <article class="panel">
+        <h2>追踪提交</h2>
+        {build_tracking_section_html(branch=current if current != base else None, start_sha=start_sha)}
+      </article>
+    </section>
+  </main>
+</body>
+</html>
+"""
+
+
+def build_branch_report():
+    return build_branch_report_markdown()
+
+
 def generate_branch_report(output_path=None):
     output = Path(output_path) if output_path else Path.cwd() / 'branch_merge_report.md'
-    output.write_text(build_branch_report(), encoding='utf-8')
+    if output.suffix.lower() == '.html':
+        content = build_branch_report_html()
+    else:
+        content = build_branch_report_markdown()
+    output.write_text(content, encoding='utf-8')
     return output.resolve()
 
 
 def generate_branch_report_menu():
     header("生成分支处理报告", icon=UI['report'])
-    note("将根据当前仓库的提交历史、merge 记录和追踪提交生成 Markdown 报告。", 'info')
-    output = generate_branch_report()
-    note(f"报告已生成: {output}", 'success')
-    note("报告包含：处理顺序、时间线图、分支流转图、追踪提交。", 'tip')
+    note("将根据当前仓库的提交历史、merge 记录和追踪提交生成报告。", 'info')
+    html_output = generate_branch_report(Path.cwd() / 'branch_merge_report.html')
+    md_output = generate_branch_report(Path.cwd() / 'branch_merge_report.md')
+    note(f"HTML 报告已生成: {html_output}", 'success')
+    note(f"Markdown 报告已生成: {md_output}", 'success')
+    note("HTML 报告包含可视化时间线和分支流转图，建议优先查看。", 'tip')
 
 
 # ─── 冲突处理 ────────────────────────────────────────────────────
