@@ -34,6 +34,36 @@ def git(repo: Path, *args: str) -> str:
 
 
 class BranchReportTest(unittest.TestCase):
+    def test_create_branch_time_prefers_reflog_over_merge_base_commit_time(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            repo.mkdir(parents=True, exist_ok=True)
+
+            git(repo, "init", "-b", "master")
+            git(repo, "config", "user.name", "Codex Test")
+            git(repo, "config", "user.email", "codex-test@example.com")
+
+            env = os.environ.copy()
+            env["GIT_AUTHOR_DATE"] = "2026-03-13T16:56:16+08:00"
+            env["GIT_COMMITTER_DATE"] = "2026-03-13T16:56:16+08:00"
+            (repo / "README.md").write_text("init\n", encoding="utf-8")
+            subprocess.run(["git", "add", "README.md"], cwd=repo, check=True, env=env)
+            subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True, env=env)
+
+            git(repo, "checkout", "-b", "dev_3.8.0_20260319")
+
+            previous = Path.cwd()
+            try:
+                os.chdir(repo)
+                events = bm.collect_report_events()
+            finally:
+                os.chdir(previous)
+
+            self.assertTrue(events)
+            self.assertEqual(events[0]["kind"], "create_branch")
+            self.assertEqual(events[0]["description"], "从 master 拉出 dev_3.8.0_20260319")
+            self.assertNotEqual(events[0]["timestamp"].strftime("%Y-%m-%d %H:%M:%S"), "2026-03-13 16:56:16")
+
     def test_new_branch_from_master_only_reports_create_event(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp) / "repo"
@@ -151,6 +181,46 @@ class BranchReportTest(unittest.TestCase):
             self.assertIn("class=\"meta-card\"", content)
             self.assertIn("color: var(--text);", content)
             self.assertNotIn("推断的处理顺序", content)
+
+    def test_report_includes_skipped_tracked_branches(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            repo.mkdir(parents=True, exist_ok=True)
+
+            git(repo, "init", "-b", "master")
+            git(repo, "config", "user.name", "Codex Test")
+            git(repo, "config", "user.email", "codex-test@example.com")
+
+            (repo / "README.md").write_text("m1\n", encoding="utf-8")
+            git(repo, "add", "README.md")
+            git(repo, "commit", "-m", "m1")
+
+            git(repo, "checkout", "-b", "feature_test1_20260319")
+            git(repo, "checkout", "master")
+            git(repo, "checkout", "-b", "feature_test2_20260319")
+            git(repo, "checkout", "master")
+            git(repo, "checkout", "-b", "feature_test3")
+            (repo / "README.md").write_text("feature test3\n", encoding="utf-8")
+            git(repo, "commit", "-am", "feat: test3 1")
+
+            git(repo, "checkout", "master")
+            git(repo, "checkout", "-b", "dev_3.8.0_20260319")
+            git(repo, "merge", "--no-ff", "feature_test3", "-m", "Merge branch 'feature_test3' into dev_3.8.0_20260319")
+            git(repo, "commit", "--allow-empty", "-m", "[DREO-MERGE] dev_3.8.0_20260319 <- feature_test1_20260319,feature_test2_20260319,feature_test3")
+
+            output = repo / "report.html"
+            previous = Path.cwd()
+            try:
+                os.chdir(repo)
+                bm.generate_branch_report(output)
+            finally:
+                os.chdir(previous)
+            content = output.read_text(encoding="utf-8")
+
+            self.assertIn("从 master 拉出 feature_test1_20260319", content)
+            self.assertIn("从 master 拉出 feature_test2_20260319", content)
+            self.assertIn("feature_test1_20260319 与 dev_3.8.0_20260319 一致，跳过合并", content)
+            self.assertIn("feature_test2_20260319 与 dev_3.8.0_20260319 一致，跳过合并", content)
 
 
 if __name__ == "__main__":

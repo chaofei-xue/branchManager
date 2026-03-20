@@ -711,6 +711,29 @@ def report_commit_by_sha(sha):
     return commits[0] if commits else None
 
 
+def report_branch_creation_reflog(branch):
+    ok, output, err = run_git('reflog', 'show', '--date=iso-strict', branch)
+    if not ok:
+        return None
+
+    entries = []
+    for line in output.splitlines():
+        match = re.match(r'^([0-9a-f]+)\s+.+@\{(.+?)\}:\s+(.+)$', line)
+        if not match:
+            continue
+        sha, timestamp_text, action = match.groups()
+        entries.append({
+            'sha': sha,
+            'timestamp': datetime.fromisoformat(timestamp_text),
+            'action': action,
+        })
+
+    for entry in reversed(entries):
+        if entry['action'].startswith('branch: Created from'):
+            return entry
+    return entries[-1] if entries else None
+
+
 def report_current_branch_merge_commits(current, start_sha):
     revision = f'{start_sha}..{current}' if start_sha else current
     return report_read_commits('--reverse', '--merges', '--first-parent', revision)
@@ -763,21 +786,27 @@ def collect_report_events():
     if current != base:
         start_sha = report_merge_base(base, current)
         start_commit = report_commit_by_sha(start_sha) if start_sha else None
+        create_entry = report_branch_creation_reflog(current)
         events = []
         seen = set()
         merged_sources = []
+        tracked_sources = []
+        tracked_source_events = {}
 
-        if start_commit:
+        if create_entry or start_commit:
+            create_timestamp = create_entry['timestamp'] if create_entry else start_commit['timestamp']
+            create_sha = create_entry['sha'] if create_entry else start_commit['sha']
             events.append({
-                'timestamp': start_commit['timestamp'],
-                'sha': start_commit['sha'],
+                'timestamp': create_timestamp,
+                'sha': create_sha,
                 'kind': 'create_branch',
                 'description': f"从 {base} 拉出 {current}",
                 'branch': current,
                 'source': base,
                 'target': current,
             })
-            seen.add(('current', start_commit['sha']))
+            if start_commit:
+                seen.add(('current', start_commit['sha']))
 
         for commit in report_current_branch_no_merge_commits(current, start_sha):
             if REPORT_TRACKING_RE.match(commit['subject']):
@@ -814,13 +843,29 @@ def collect_report_events():
                 'target': target,
             })
 
+        tracking_commits = report_tracking_commits_for_branch(current, start_sha)
+        for commit in tracking_commits:
+            match = REPORT_TRACKING_RE.match(commit['subject'])
+            if not match:
+                continue
+            target, sources = match.groups()
+            for source in [item.strip() for item in sources.split(',') if item.strip()]:
+                if source not in tracked_sources:
+                    tracked_sources.append(source)
+                tracked_source_events.setdefault(source, {
+                    'timestamp': commit['timestamp'],
+                    'sha': commit['sha'],
+                    'target': target,
+                })
+
         source_branches = []
-        for branch in merged_sources:
+        for branch in merged_sources + tracked_sources:
             if branch not in source_branches and branch not in (base, current):
                 source_branches.append(branch)
 
         for branch in source_branches:
-            for index, commit in enumerate(report_first_unique_commits(base, branch)):
+            unique_commits = report_first_unique_commits(base, branch)
+            for index, commit in enumerate(unique_commits):
                 key = ('branch', branch, commit['sha'])
                 if key in seen:
                     continue
@@ -840,7 +885,33 @@ def collect_report_events():
                     'target': '',
                 })
 
-        for commit in report_tracking_commits_for_branch(current, start_sha):
+            if not unique_commits:
+                create_entry = report_branch_creation_reflog(branch)
+                merge_base_sha = report_merge_base(base, branch)
+                base_commit = report_commit_by_sha(merge_base_sha) if merge_base_sha else None
+                if create_entry or base_commit:
+                    events.append({
+                        'timestamp': create_entry['timestamp'] if create_entry else base_commit['timestamp'],
+                        'sha': create_entry['sha'] if create_entry else base_commit['sha'],
+                        'kind': 'create_branch',
+                        'description': f"从 {base} 拉出 {branch}",
+                        'branch': branch,
+                        'source': base,
+                        'target': branch,
+                    })
+                if branch in tracked_source_events and branch not in merged_sources:
+                    skip_info = tracked_source_events[branch]
+                    events.append({
+                        'timestamp': skip_info['timestamp'],
+                        'sha': skip_info['sha'],
+                        'kind': 'skip_merge',
+                        'description': f"{branch} 与 {skip_info['target']} 一致，跳过合并",
+                        'branch': '',
+                        'source': branch,
+                        'target': skip_info['target'],
+                    })
+
+        for commit in tracking_commits:
             match = REPORT_TRACKING_RE.match(commit['subject'])
             if not match:
                 continue
@@ -1022,6 +1093,13 @@ def build_report_flowchart(base, branches, events):
                 lines.append(
                     f'    {report_safe_node_id(event["source"])} -->|{event["timestamp"].strftime("%H:%M:%S")} merge| {report_safe_node_id(event["target"])}'
                 )
+        elif event['kind'] == 'skip_merge' and event['source'] and event['target']:
+            edge = (event['source'], event['target'], f"skip-{event['sha']}")
+            if edge not in added_edges:
+                added_edges.add(edge)
+                lines.append(
+                    f'    {report_safe_node_id(event["source"])} -.->|{event["timestamp"].strftime("%H:%M:%S")} skip| {report_safe_node_id(event["target"])}'
+                )
 
     lines.append('```')
     return '\n'.join(lines)
@@ -1127,6 +1205,7 @@ def report_kind_label(event_type):
         'branch_commit': '分支提交',
         'create': '创建分支',
         'merge': '分支合并',
+        'skip_merge': '跳过合并',
         'tracking': '追踪记录',
     }
     return labels.get(event_type, event_type)
@@ -1153,6 +1232,58 @@ def build_report_timeline_html(events):
     return ''.join(blocks)
 
 
+def wrap_svg_text(text, max_width=26, max_lines=3):
+    lines = []
+    current = []
+    current_width = 0
+
+    for char in text:
+        char_width = display_width(char)
+        if current and current_width + char_width > max_width:
+            lines.append(''.join(current))
+            current = [char]
+            current_width = char_width
+            if len(lines) >= max_lines - 1:
+                break
+            continue
+        current.append(char)
+        current_width += char_width
+
+    remainder = ''.join(current)
+    if len(lines) < max_lines and remainder:
+        lines.append(remainder)
+
+    consumed = ''.join(lines)
+    if len(consumed) < len(text):
+        if lines:
+            lines[-1] = lines[-1].rstrip(' .,_-') + '…'
+        else:
+            lines = [text[: max(1, max_width - 1)] + '…']
+    return lines or ['']
+
+
+def svg_multiline_text(x, center_y, lines, class_name, line_height=16):
+    start_y = center_y - ((len(lines) - 1) * line_height) / 2
+    parts = [f'<text x="{x}" y="{start_y}" text-anchor="middle" class="{class_name}">']
+    for index, line in enumerate(lines):
+        dy = 0 if index == 0 else line_height
+        parts.append(f'<tspan x="{x}" dy="{dy}">{escape(line)}</tspan>')
+    parts.append('</text>')
+    return ''.join(parts)
+
+
+def build_tracking_card_lines(event):
+    sources = [item.strip() for item in str(event['source']).split(',') if item.strip()]
+    summary = [
+        f"目标分支：{event['target']}",
+        f"纳入分支：{len(sources)} 个",
+    ]
+    if sources:
+        source_text = "、".join(sources)
+        summary.extend(wrap_svg_text(f"来源：{source_text}", max_width=40, max_lines=4))
+    return summary
+
+
 def build_report_flow_svg(base, branches, events):
     ordered_branches = report_branch_order(base, branches, events)
     if not ordered_branches:
@@ -1160,19 +1291,53 @@ def build_report_flow_svg(base, branches, events):
 
     graph_events = [
         event for event in events
-        if report_event_type(event) in ('create', 'merge', 'tracking')
+        if report_event_type(event) in ('create', 'merge', 'skip_merge')
     ]
-    width = max(960, 220 * len(ordered_branches))
-    row_height = 96
-    height = 140 + max(len(graph_events), 1) * row_height
-    padding_x = 110
-    branch_gap = 220
-    top_y = 78
-    lane_bottom = height - 48
-    branch_x = {
-        branch: padding_x + index * branch_gap
-        for index, branch in enumerate(ordered_branches)
-    }
+    padding_x = 72
+    branch_gap = 84
+    top_y = 106
+    header_y = 20
+
+    branch_cards = {}
+    cursor_x = padding_x
+    for branch in ordered_branches:
+        branch_lines = wrap_svg_text(branch, max_width=22, max_lines=2)
+        branch_width = min(max(168, max(display_width(line) for line in branch_lines) * 8 + 40), 260)
+        center_x = cursor_x + branch_width / 2
+        branch_cards[branch] = {
+            'x': center_x,
+            'width': branch_width,
+            'lines': branch_lines,
+            'height': 54 if len(branch_lines) == 1 else 70,
+        }
+        cursor_x += branch_width + branch_gap
+
+    branch_x = {branch: card['x'] for branch, card in branch_cards.items()}
+    width = max(1100, int(cursor_x - branch_gap + padding_x))
+
+    event_blocks = []
+    for event in graph_events:
+        event_type = report_event_type(event)
+        lines = wrap_svg_text(event['description'], max_width=28, max_lines=3)
+        card_width = min(max(220, max(display_width(line) for line in lines) * 7 + 40), 340)
+        card_height = 28 + len(lines) * 18
+        row_height = max(108, card_height + 52)
+        event_blocks.append({
+            'event': event,
+            'type': event_type,
+            'lines': lines,
+            'card_width': card_width,
+            'card_height': card_height,
+            'row_height': row_height,
+        })
+
+    current_y = top_y + 38
+    for block in event_blocks:
+        block['y'] = current_y
+        current_y += block['row_height']
+
+    height = max(300, int(current_y + 56))
+    lane_bottom = height - 40
 
     svg = [
         f'<svg class="branch-graph-svg" viewBox="0 0 {width} {height}" '
@@ -1181,6 +1346,9 @@ def build_report_flow_svg(base, branches, events):
         '<marker id="arrow-head" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto">',
         '<path d="M0,0 L10,5 L0,10 z" fill="#2563eb" />',
         '</marker>',
+        '<marker id="arrow-head-purple" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto">',
+        '<path d="M0,0 L10,5 L0,10 z" fill="#8b5cf6" />',
+        '</marker>',
         '<filter id="card-shadow" x="-20%" y="-20%" width="140%" height="140%">',
         '<feDropShadow dx="0" dy="6" stdDeviation="8" flood-color="#0f172a" flood-opacity="0.14" />',
         '</filter>',
@@ -1188,29 +1356,19 @@ def build_report_flow_svg(base, branches, events):
     ]
 
     for branch in ordered_branches:
-        x = branch_x[branch]
+        card = branch_cards[branch]
+        x = card['x']
+        card_y = header_y if len(card['lines']) == 1 else 14
         svg.append(f'<line x1="{x}" y1="{top_y}" x2="{x}" y2="{lane_bottom}" class="lane-line" />')
-        svg.append(
-            f'<rect x="{x - 78}" y="18" width="156" height="40" rx="14" class="branch-card" />'
-            f'<text x="{x}" y="43" text-anchor="middle" class="branch-card-text">{escape(branch)}</text>'
-        )
+        svg.append(f'<rect x="{x - card["width"] / 2}" y="{card_y}" width="{card["width"]}" '
+                   f'height="{card["height"]}" rx="14" class="branch-card" />')
+        svg.append(svg_multiline_text(x, card_y + card['height'] / 2 + 1, card['lines'], 'branch-card-text', line_height=16))
 
-    for index, event in enumerate(graph_events, 1):
-        y = top_y + index * row_height
-        event_type = report_event_type(event)
-        label = escape(event['description'])
-
-        if event_type == 'tracking':
-            target = event['target']
-            if target not in branch_x:
-                continue
-            x = branch_x[target]
-            svg.append(
-                f'<rect x="{x - 105}" y="{y - 22}" width="210" height="44" rx="12" class="tracking-card" filter="url(#card-shadow)" />'
-                f'<text x="{x}" y="{y - 3}" text-anchor="middle" class="tracking-title">追踪提交</text>'
-                f'<text x="{x}" y="{y + 14}" text-anchor="middle" class="tracking-text">{label}</text>'
-            )
-            continue
+    for block in event_blocks:
+        event = block['event']
+        y = block['y']
+        event_type = block['type']
+        lines = block['lines']
 
         source = base if event_type == 'create' else event['source']
         target = event['branch'] if event_type == 'create' else event['target']
@@ -1218,19 +1376,20 @@ def build_report_flow_svg(base, branches, events):
             continue
         x1 = branch_x[source]
         x2 = branch_x[target]
-        line_class = 'create-line' if event_type == 'create' else 'merge-line'
+        line_class = {
+            'create': 'create-line',
+            'merge': 'merge-line',
+            'skip_merge': 'skip-line',
+        }.get(event_type, 'merge-line')
         mid_x = (x1 + x2) / 2
-        text_width = min(max(200, len(event['description']) * 8), 320)
         svg.append(f'<circle cx="{x1}" cy="{y}" r="5" class="event-dot" />')
         svg.append(f'<circle cx="{x2}" cy="{y}" r="5" class="event-dot" />')
-        svg.append(
-            f'<line x1="{x1}" y1="{y}" x2="{x2}" y2="{y}" class="{line_class}" marker-end="url(#arrow-head)" />'
-        )
-        svg.append(
-            f'<rect x="{mid_x - text_width / 2}" y="{y - 20}" width="{text_width}" height="40" rx="12" '
-            f'class="event-label-card" filter="url(#card-shadow)" />'
-            f'<text x="{mid_x}" y="{y + 5}" text-anchor="middle" class="event-label">{label}</text>'
-        )
+        marker = 'url(#arrow-head)' if event_type != 'skip_merge' else 'url(#arrow-head-purple)'
+        svg.append(f'<line x1="{x1}" y1="{y}" x2="{x2}" y2="{y}" class="{line_class}" marker-end="{marker}" />')
+        svg.append(f'<rect x="{mid_x - block["card_width"] / 2}" y="{y - block["card_height"] / 2}" '
+                   f'width="{block["card_width"]}" height="{block["card_height"]}" rx="12" '
+                   f'class="event-label-card" filter="url(#card-shadow)" />')
+        svg.append(svg_multiline_text(mid_x, y + 1, lines, 'event-label', line_height=16))
 
     svg.append('</svg>')
     return ''.join(svg)
@@ -1472,6 +1631,11 @@ def build_branch_report_html():
       stroke: #2563eb;
       stroke-width: 4;
     }}
+    .skip-line {{
+      stroke: #8b5cf6;
+      stroke-width: 3;
+      stroke-dasharray: 8 8;
+    }}
     .event-label-card {{
       fill: #ffffff;
       stroke: #d7e0ec;
@@ -1486,6 +1650,18 @@ def build_branch_report_html():
       fill: #f5f3ff;
       stroke: #c4b5fd;
       stroke-width: 1.2;
+    }}
+    .tracking-link {{
+      stroke: #8b5cf6;
+      stroke-width: 2.2;
+      stroke-dasharray: 6 6;
+      opacity: 0.78;
+    }}
+    .tracking-node {{
+      fill: #8b5cf6;
+    }}
+    .tracking-target-node {{
+      fill: #7c3aed;
     }}
     .tracking-title {{
       fill: #6d28d9;
