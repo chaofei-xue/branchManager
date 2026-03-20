@@ -82,6 +82,19 @@ def icon_slot(icon, color='36', width=2):
     return f"{paint(icon, color)}{padding}"
 
 
+def terminal_link(path, label=None):
+    try:
+        target = Path(path).resolve().as_uri()
+    except ValueError:
+        return str(path)
+
+    text = label or str(path)
+    if not sys.stdout.isatty():
+        return str(path)
+    hyperlink = f"\033]8;;{target}\033\\{text}\033]8;;\033\\"
+    return paint(hyperlink, '4', '34')
+
+
 def note(message, level='info'):
     styles = {
         'info': ('🔹', '36'),
@@ -709,7 +722,30 @@ def report_current_branch_no_merge_commits(current, start_sha):
 
 
 def report_tracking_commits_for_branch(branch, start_sha=None):
-    commits = report_read_commits('--reverse', branch)
+    if branch and not is_integration_branch(branch):
+        return []
+
+    ok, output, err = run_git(
+        'log',
+        '--reverse',
+        branch,
+        '-F',
+        f'--grep={MERGE_TAG}',
+        '--pretty=format:%H%x1f%ad%x1f%s',
+        '--date=iso-strict',
+    )
+    if not ok:
+        raise RuntimeError(f"读取分支追踪提交失败: {err or output}")
+
+    commits = []
+    for line in output.splitlines():
+        sha, timestamp, subject = line.split('\x1f', 2)
+        commits.append({
+            'sha': sha,
+            'timestamp': datetime.fromisoformat(timestamp),
+            'subject': subject,
+        })
+
     results = []
     for commit in commits:
         if start_sha and not report_commit_descends_from(start_sha, commit['sha']):
@@ -1558,8 +1594,8 @@ def generate_branch_report_menu():
     note("将根据当前仓库的提交历史、merge 记录和追踪提交生成报告。", 'info')
     html_output = generate_branch_report(Path.cwd() / 'branch_merge_report.html')
     md_output = generate_branch_report(Path.cwd() / 'branch_merge_report.md')
-    note(f"HTML 报告已生成: {html_output}", 'success')
-    note(f"Markdown 报告已生成: {md_output}", 'success')
+    note(f"HTML 报告已生成: {terminal_link(html_output)}", 'success')
+    note(f"Markdown 报告已生成: {terminal_link(md_output)}", 'success')
     note("HTML 报告包含可视化时间线和分支流转图，建议优先查看。", 'tip')
 
 
