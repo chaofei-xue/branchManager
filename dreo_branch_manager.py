@@ -829,10 +829,11 @@ def report_tracking_commits_for_branch(branch, start_sha=None):
     if branch and not is_integration_branch(branch):
         return []
 
+    revision = f'{start_sha}..{branch}' if start_sha else branch
     ok, output, err = run_git(
         'log',
         '--reverse',
-        branch,
+        revision,
         '-F',
         f'--grep={MERGE_TAG}',
         '--pretty=format:%H%x1f%ad%x1f%s',
@@ -841,21 +842,15 @@ def report_tracking_commits_for_branch(branch, start_sha=None):
     if not ok:
         raise RuntimeError(f"读取分支追踪提交失败: {err or output}")
 
-    commits = []
+    results = []
     for line in output.splitlines():
         sha, timestamp, subject = line.split('\x1f', 2)
-        commits.append({
-            'sha': sha,
-            'timestamp': datetime.fromisoformat(timestamp),
-            'subject': subject,
-        })
-
-    results = []
-    for commit in commits:
-        if start_sha and not report_commit_descends_from(start_sha, commit['sha']):
-            continue
-        if REPORT_TRACKING_RE.match(commit['subject']):
-            results.append(commit)
+        if REPORT_TRACKING_RE.match(subject):
+            results.append({
+                'sha': sha,
+                'timestamp': datetime.fromisoformat(timestamp),
+                'subject': subject,
+            })
     return results
 
 
@@ -878,9 +873,27 @@ def collect_report_events():
         if create_entry or start_commit:
             create_source = create_entry.get('source') if create_entry else None
             base_refs = {base, report_ref_name(base), 'HEAD'}
-            if not create_entry or create_source in base_refs:
-                create_timestamp = create_entry['timestamp'] if create_entry else start_commit['timestamp']
-                create_sha = create_entry['sha'] if create_entry else start_commit['sha']
+            is_from_remote_self = (
+                is_integration_branch(current)
+                and create_source
+                and create_source.startswith('origin/')
+                and create_source.split('/', 1)[1] == current
+            )
+            from_base = (
+                not create_entry
+                or create_source in base_refs
+                or is_from_remote_self
+            )
+            if from_base:
+                if is_from_remote_self and start_commit:
+                    create_timestamp = start_commit['timestamp']
+                    create_sha = start_commit['sha']
+                elif create_entry:
+                    create_timestamp = create_entry['timestamp']
+                    create_sha = create_entry['sha']
+                else:
+                    create_timestamp = start_commit['timestamp']
+                    create_sha = start_commit['sha']
                 events.append({
                     'timestamp': create_timestamp,
                     'sha': create_sha,
@@ -1022,6 +1035,17 @@ def collect_report_events():
                 'source': sources,
                 'target': target,
             })
+
+        first_merge_time = None
+        for event in events:
+            if event['kind'] == 'merge':
+                first_merge_time = event['timestamp']
+                break
+        if first_merge_time:
+            for event in events:
+                if event['kind'] == 'create_branch' and event['branch'] == current and event['timestamp'] >= first_merge_time:
+                    from datetime import timedelta
+                    event['timestamp'] = first_merge_time - timedelta(seconds=1)
 
         events.sort(key=lambda item: (item['timestamp'], item['sha'], item['kind']))
         return events
@@ -1178,7 +1202,11 @@ def build_report_flowchart(base, branches, events):
 
     added_edges = set()
     for event in events:
-        if event['kind'] == 'branch_commit' and event['branch'] and event['description'].startswith(f"从 {base} 拉出 "):
+        is_create = (
+            event['kind'] == 'create_branch'
+            or (event['kind'] == 'branch_commit' and event['branch'] and event['description'].startswith(f"从 {base} 拉出 "))
+        )
+        if is_create and event.get('branch'):
             edge = (base, event['branch'], 'create')
             if edge not in added_edges:
                 added_edges.add(edge)
