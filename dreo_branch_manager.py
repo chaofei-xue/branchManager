@@ -62,6 +62,12 @@ MANAGED_BRANCH_PATTERNS = {
     'integration': re.compile(r'^(dev|release)_[^/]+_\d{8}$'),
 }
 
+MERGE_TAG = '[DREO-MERGE]'
+
+_ANSI_RE = re.compile(r'\033\[[0-9;]*m')
+
+_BRANCH_NAME_INVALID_CHARS = set(' ~^:?*[\\')
+
 
 def paint(text, *codes):
     if not USE_COLOR or not codes:
@@ -125,6 +131,7 @@ def branch_badge(branch):
 
 
 def display_width(text):
+    text = _ANSI_RE.sub('', text)
     width = 0
     for char in text:
         if char == '\n':
@@ -171,6 +178,16 @@ def read_input(prompt, prefix='> ', redraw=False, echo_label=None):
     return value
 
 
+def _drain_escape_sequence(fd):
+    """读取并丢弃 ESC 后续字节，非阻塞方式避免挂起。"""
+    import select as _select
+    for _ in range(8):
+        ready, _, _ = _select.select([fd], [], [], 0.05)
+        if not ready:
+            break
+        os.read(fd, 1)
+
+
 def read_text_input(prompt, prefix='> '):
     print(f"\n  {prompt}")
     if not (sys.stdin.isatty() and sys.stdout.isatty() and termios and tty):
@@ -203,7 +220,7 @@ def read_text_input(prompt, prefix='> '):
                     render()
                 continue
             if chunk == b'\x1b':
-                os.read(fd, 2)
+                _drain_escape_sequence(fd)
                 continue
 
             text = decoder.decode(chunk, final=False)
@@ -224,8 +241,11 @@ def read_menu_input(prompt="", prefix='> '):
     if not (sys.stdin.isatty() and sys.stdout.isatty() and termios and tty):
         return input(f"  {prefix}").strip()
 
+    import select as _select
+
     fd = sys.stdin.fileno()
     old_settings = termios.tcgetattr(fd)
+    decoder = codecs.getincrementaldecoder('utf-8')()
     chars = []
 
     def render():
@@ -252,17 +272,24 @@ def read_menu_input(prompt="", prefix='> '):
                     render()
                 continue
             if chunk == b'\x1b':
-                seq = os.read(fd, 2)
-                sys.stdout.write("\r\033[2K\n")
-                sys.stdout.flush()
-                if seq == b'[A':
-                    return '__UP__'
-                if seq == b'[B':
-                    return '__DOWN__'
+                ready, _, _ = _select.select([fd], [], [], 0.05)
+                if ready:
+                    seq = os.read(fd, 1)
+                    if seq == b'[':
+                        ready2, _, _ = _select.select([fd], [], [], 0.05)
+                        if ready2:
+                            code = os.read(fd, 1)
+                            sys.stdout.write("\r\033[2K\n")
+                            sys.stdout.flush()
+                            if code == b'A':
+                                return '__UP__'
+                            if code == b'B':
+                                return '__DOWN__'
+                    _drain_escape_sequence(fd)
                 render()
                 continue
 
-            text = chunk.decode('utf-8', errors='ignore')
+            text = decoder.decode(chunk, final=False)
             if text:
                 chars.append(text)
                 render()
@@ -657,8 +684,38 @@ def report_read_commits(*log_args):
     return commits
 
 
+def report_read_commits_with_parents(*log_args):
+    ok, output, err = run_git(
+        'log',
+        *log_args,
+        '--pretty=format:%H%x1f%P%x1f%ad%x1f%s',
+        '--date=iso-strict',
+    )
+    if not ok:
+        raise RuntimeError(f"读取 git 日志失败: {err or output}")
+
+    commits = []
+    for line in output.splitlines():
+        sha, parents_text, timestamp, subject = line.split('\x1f', 3)
+        commits.append({
+            'sha': sha,
+            'parents': [item for item in parents_text.split() if item],
+            'timestamp': datetime.fromisoformat(timestamp),
+            'subject': subject,
+        })
+    return commits
+
+
+def report_ref_name(branch):
+    if has_local_branch(branch):
+        return branch
+    if has_remote_branch(branch):
+        return f'origin/{branch}'
+    return branch
+
+
 def report_first_unique_commits(base, branch):
-    return report_read_commits('--reverse', '--no-merges', f'{base}..{branch}')
+    return report_read_commits('--reverse', '--no-merges', f'{report_ref_name(base)}..{report_ref_name(branch)}')
 
 
 def report_base_first_parent_commits(base):
@@ -677,7 +734,7 @@ def report_tracking_commits():
 
 
 def report_merge_base(base, branch):
-    ok, output, _ = run_git('merge-base', base, branch)
+    ok, output, _ = run_git('merge-base', report_ref_name(base), report_ref_name(branch))
     return output.strip() if ok and output.strip() else None
 
 
@@ -686,6 +743,11 @@ def report_commit_descends_from(start_sha, commit_sha):
         return True
     ok, _, _ = run_git('merge-base', '--is-ancestor', start_sha, commit_sha)
     return ok
+
+
+def report_sha_matches_branch_line(base, sha):
+    base_ref = report_ref_name(base)
+    return report_commit_descends_from(sha, base_ref) or report_commit_descends_from(base_ref, sha)
 
 
 def report_start_commit(base, branches):
@@ -722,10 +784,15 @@ def report_branch_creation_reflog(branch):
         if not match:
             continue
         sha, timestamp_text, action = match.groups()
+        source = None
+        action_match = re.match(r'^branch: Created from (.+)$', action)
+        if action_match:
+            source = action_match.group(1).strip()
         entries.append({
             'sha': sha,
             'timestamp': datetime.fromisoformat(timestamp_text),
             'action': action,
+            'source': source,
         })
 
     for entry in reversed(entries):
@@ -736,12 +803,26 @@ def report_branch_creation_reflog(branch):
 
 def report_current_branch_merge_commits(current, start_sha):
     revision = f'{start_sha}..{current}' if start_sha else current
-    return report_read_commits('--reverse', '--merges', '--first-parent', revision)
+    return report_read_commits_with_parents('--reverse', '--merges', '--first-parent', revision)
 
 
 def report_current_branch_no_merge_commits(current, start_sha):
     revision = f'{start_sha}..{current}' if start_sha else current
     return report_read_commits('--reverse', '--first-parent', '--no-merges', revision)
+
+
+def report_resolve_parent_source(base, current, parent_sha):
+    if report_sha_matches_branch_line(base, parent_sha):
+        return base
+
+    candidates = []
+    for branch in sorted(set(get_local_branches() + get_remote_branches())):
+        if branch in (base, current):
+            continue
+        ok, output, _ = run_git('rev-parse', report_ref_name(branch))
+        if ok and output.strip() == parent_sha:
+            candidates.append(branch)
+    return candidates[0] if candidates else None
 
 
 def report_tracking_commits_for_branch(branch, start_sha=None):
@@ -792,34 +873,44 @@ def collect_report_events():
         merged_sources = []
         tracked_sources = []
         tracked_source_events = {}
+        has_current_create_event = False
 
         if create_entry or start_commit:
-            create_timestamp = create_entry['timestamp'] if create_entry else start_commit['timestamp']
-            create_sha = create_entry['sha'] if create_entry else start_commit['sha']
-            events.append({
-                'timestamp': create_timestamp,
-                'sha': create_sha,
-                'kind': 'create_branch',
-                'description': f"从 {base} 拉出 {current}",
-                'branch': current,
-                'source': base,
-                'target': current,
-            })
+            create_source = create_entry.get('source') if create_entry else None
+            base_refs = {base, report_ref_name(base), 'HEAD'}
+            if not create_entry or create_source in base_refs:
+                create_timestamp = create_entry['timestamp'] if create_entry else start_commit['timestamp']
+                create_sha = create_entry['sha'] if create_entry else start_commit['sha']
+                events.append({
+                    'timestamp': create_timestamp,
+                    'sha': create_sha,
+                    'kind': 'create_branch',
+                    'description': f"从 {base} 拉出 {current}",
+                    'branch': current,
+                    'source': base,
+                    'target': current,
+                })
+                has_current_create_event = True
             if start_commit:
                 seen.add(('current', start_commit['sha']))
 
-        for commit in report_current_branch_no_merge_commits(current, start_sha):
+        current_commits = report_current_branch_no_merge_commits(current, start_sha)
+        for index, commit in enumerate(current_commits):
             if REPORT_TRACKING_RE.match(commit['subject']):
                 continue
             key = ('current', commit['sha'])
             if key in seen:
                 continue
             seen.add(key)
+            if not has_current_create_event and index == 0:
+                description = f"从 {base} 拉出 {current}，并提交 {commit['subject']}"
+            else:
+                description = f"{current} 提交 {commit['subject']}"
             events.append({
                 'timestamp': commit['timestamp'],
                 'sha': commit['sha'],
                 'kind': 'branch_commit',
-                'description': f"{current} 提交 {commit['subject']}",
+                'description': description,
                 'branch': current,
                 'source': '',
                 'target': '',
@@ -827,11 +918,17 @@ def collect_report_events():
 
         for commit in report_current_branch_merge_commits(current, start_sha):
             match = REPORT_MERGE_RE.match(commit['subject'])
-            if not match:
-                continue
-            source, target = match.groups()
-            if target != current:
-                continue
+            if match:
+                source, target = match.groups()
+                if target != current:
+                    continue
+            else:
+                if len(commit.get('parents', [])) < 2:
+                    continue
+                source = report_resolve_parent_source(base, current, commit['parents'][1])
+                target = current
+                if not source:
+                    continue
             merged_sources.append(source)
             events.append({
                 'timestamp': commit['timestamp'],
@@ -1777,8 +1874,6 @@ def generate_branch_report_menu():
 
 # ─── 冲突处理 ────────────────────────────────────────────────────
 
-MERGE_TAG = '[DREO-MERGE]'
-
 
 def write_tracking_commit(int_branch, branches):
     """写一条空提交，记录本次集成的所有开发分支，格式：
@@ -1835,6 +1930,11 @@ def handle_conflict(merging_branch, action_label="合并"):
             note("请输入 1 或 2。", 'warn')
 
 
+def _has_merge_conflict(stdout, stderr):
+    combined = stdout + stderr
+    return 'CONFLICT' in combined or '冲突' in combined or get_unmerged_files()
+
+
 def do_merge(source_branch, action_label="合并"):
     """将 source_branch 合并到当前分支，处理冲突。返回是否成功。"""
     current = get_current_branch()
@@ -1843,10 +1943,9 @@ def do_merge(source_branch, action_label="合并"):
     if ok:
         note(f"{action_label}成功: {source_branch}", 'success')
         return True
-    if 'CONFLICT' in out or 'CONFLICT' in err:
+    if _has_merge_conflict(out, err):
         run_git('rerere')
 
-        # rerere 可能发生在 merge 阶段，也可能只更新工作区而不会自动 git add。
         for path in get_unmerged_files():
             if not has_conflict_markers(path):
                 run_git('add', path)
@@ -1891,7 +1990,7 @@ def create_feature_branch():
         )
         if not name:
             return False
-        if any(c in name for c in ' ~^:?*[\\'):
+        if any(c in name for c in _BRANCH_NAME_INVALID_CHARS):
             note("包含非法字符，请重新输入。", 'warn')
             continue
         branch_name = f"{branch_type}_{name}_{date_suffix}"
@@ -2033,6 +2132,9 @@ def create_integration_branch():
         )
         if not version:
             return False
+        if any(c in version for c in _BRANCH_NAME_INVALID_CHARS):
+            note("包含非法字符，请重新输入。", 'warn')
+            continue
         break
 
     int_branch = f"{env_prefix}_{version}_{date_suffix}"
@@ -2116,11 +2218,12 @@ def get_merged_feature_branches(int_branch):
     """
     _, log, _ = run_git('log', '--all', '-F', f'--grep={MERGE_TAG} {int_branch} <-',
                         '--pretty=format:%s')
+    prefix = f"{MERGE_TAG} {int_branch} <- "
     seen, result = set(), []
     for line in log.splitlines():
-        if '<-' not in line:
+        if not line.startswith(prefix):
             continue
-        branch_list = line.split('<-', 1)[-1].strip()
+        branch_list = line[len(prefix):]
         for b in branch_list.split(','):
             b = b.strip()
             if b and b not in seen:

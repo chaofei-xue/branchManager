@@ -222,6 +222,167 @@ class BranchReportTest(unittest.TestCase):
             self.assertIn("feature_test1_20260319 与 dev_3.8.0_20260319 一致，跳过合并", content)
             self.assertIn("feature_test2_20260319 与 dev_3.8.0_20260319 一致，跳过合并", content)
 
+    def test_report_supports_remote_only_tracked_branch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            remote = root / "remote.git"
+            repo = root / "repo"
+
+            git(root, "init", "--bare", str(remote))
+            repo.mkdir(parents=True, exist_ok=True)
+
+            git(repo, "init", "-b", "master")
+            git(repo, "config", "user.name", "Codex Test")
+            git(repo, "config", "user.email", "codex-test@example.com")
+            git(repo, "remote", "add", "origin", str(remote))
+
+            (repo / "README.md").write_text("m1\n", encoding="utf-8")
+            git(repo, "add", "README.md")
+            git(repo, "commit", "-m", "m1")
+            git(repo, "push", "-u", "origin", "master")
+
+            feature = "feature_remote_20260319"
+            integration = "dev_9.0.0_20260319"
+
+            git(repo, "checkout", "-b", feature)
+            (repo / "remote.txt").write_text("remote only\n", encoding="utf-8")
+            git(repo, "add", "remote.txt")
+            git(repo, "commit", "-m", "remote feature commit")
+            git(repo, "push", "-u", "origin", feature)
+
+            git(repo, "checkout", "master")
+            git(repo, "branch", "-D", feature)
+            git(repo, "checkout", "-b", integration)
+            git(repo, "commit", "--allow-empty", "-m", f"[DREO-MERGE] {integration} <- {feature}")
+
+            output = repo / "report.html"
+            previous = Path.cwd()
+            try:
+                os.chdir(repo)
+                bm.generate_branch_report(output)
+            finally:
+                os.chdir(previous)
+            content = output.read_text(encoding="utf-8")
+
+            self.assertIn(feature, content)
+            self.assertIn(integration, content)
+
+    def test_report_detects_merge_with_custom_commit_subject(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            repo.mkdir(parents=True, exist_ok=True)
+
+            git(repo, "init", "-b", "master")
+            git(repo, "config", "user.name", "Codex Test")
+            git(repo, "config", "user.email", "codex-test@example.com")
+
+            (repo / "README.md").write_text("m1\n", encoding="utf-8")
+            git(repo, "add", "README.md")
+            git(repo, "commit", "-m", "m1")
+
+            git(repo, "checkout", "-b", "feature_custom_merge_20260323")
+            (repo / "feature.txt").write_text("feature\n", encoding="utf-8")
+            git(repo, "add", "feature.txt")
+            git(repo, "commit", "-m", "feature work")
+
+            git(repo, "checkout", "master")
+            (repo / "master.txt").write_text("master update\n", encoding="utf-8")
+            git(repo, "add", "master.txt")
+            git(repo, "commit", "-m", "master update")
+
+            git(repo, "checkout", "feature_custom_merge_20260323")
+            git(repo, "merge", "--no-ff", "master", "-m", "feat: 合并冲突")
+
+            output = repo / "report.html"
+            previous = Path.cwd()
+            try:
+                os.chdir(repo)
+                bm.generate_branch_report(output)
+            finally:
+                os.chdir(previous)
+            content = output.read_text(encoding="utf-8")
+
+            self.assertIn("将 master 合入 feature_custom_merge_20260323", content)
+
+    def test_report_does_not_fake_create_event_for_remote_tracking_branch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            remote = root / "remote.git"
+            repo = root / "repo"
+
+            git(root, "init", "--bare", str(remote))
+            repo.mkdir(parents=True, exist_ok=True)
+
+            git(repo, "init", "-b", "master")
+            git(repo, "config", "user.name", "Codex Test")
+            git(repo, "config", "user.email", "codex-test@example.com")
+            git(repo, "remote", "add", "origin", str(remote))
+
+            (repo / "README.md").write_text("m1\n", encoding="utf-8")
+            git(repo, "add", "README.md")
+            git(repo, "commit", "-m", "m1")
+            git(repo, "push", "-u", "origin", "master")
+
+            feature = "feature_remote_track_20260323"
+            git(repo, "checkout", "-b", feature)
+            git(repo, "push", "-u", "origin", feature)
+
+            git(repo, "checkout", "master")
+            git(repo, "branch", "-D", feature)
+            git(repo, "checkout", "-b", feature, "--track", f"origin/{feature}")
+
+            output = repo / "report.html"
+            previous = Path.cwd()
+            try:
+                os.chdir(repo)
+                bm.generate_branch_report(output)
+            finally:
+                os.chdir(previous)
+            content = output.read_text(encoding="utf-8")
+
+            self.assertNotIn(f"从 master 拉出 {feature}", content)
+
+    def test_report_uses_first_unique_commit_as_create_event_when_reflog_is_remote_tracking(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            remote = root / "remote.git"
+            repo = root / "repo"
+
+            git(root, "init", "--bare", str(remote))
+            repo.mkdir(parents=True, exist_ok=True)
+
+            git(repo, "init", "-b", "master")
+            git(repo, "config", "user.name", "Codex Test")
+            git(repo, "config", "user.email", "codex-test@example.com")
+            git(repo, "remote", "add", "origin", str(remote))
+
+            (repo / "README.md").write_text("m1\n", encoding="utf-8")
+            git(repo, "add", "README.md")
+            git(repo, "commit", "-m", "m1")
+            git(repo, "push", "-u", "origin", "master")
+
+            feature = "feature_flow_20260323"
+            git(repo, "checkout", "-b", feature)
+            (repo / "feature.txt").write_text("feature start\n", encoding="utf-8")
+            git(repo, "add", "feature.txt")
+            git(repo, "commit", "-m", "feature start")
+            git(repo, "push", "-u", "origin", feature)
+
+            git(repo, "checkout", "master")
+            git(repo, "branch", "-D", feature)
+            git(repo, "checkout", "-b", feature, "--track", f"origin/{feature}")
+
+            output = repo / "report.html"
+            previous = Path.cwd()
+            try:
+                os.chdir(repo)
+                bm.generate_branch_report(output)
+            finally:
+                os.chdir(previous)
+            content = output.read_text(encoding="utf-8")
+
+            self.assertIn(f"从 master 拉出 {feature}，并提交 feature start", content)
+
 
 if __name__ == "__main__":
     unittest.main()
