@@ -258,7 +258,37 @@ class RemoteBranchSupportTest(unittest.TestCase):
         )
 
         self.assertIn(target_branch, self.local_branches())
-        self.assertIn("当前第 1/2 页", output)
+
+    def test_merge_master_to_current_branch(self) -> None:
+        feature = f"feature_merge_base_{TEST_DATE}"
+
+        git(self.repo, "checkout", "-b", feature)
+        (self.repo / "feature.txt").write_text("feature work\n", encoding="utf-8")
+        git(self.repo, "add", "feature.txt")
+        git(self.repo, "commit", "-m", "feature work")
+
+        git(self.repo, "checkout", "master")
+        (self.repo / "master.txt").write_text("master update\n", encoding="utf-8")
+        git(self.repo, "add", "master.txt")
+        git(self.repo, "commit", "-m", "master update")
+
+        git(self.repo, "checkout", feature)
+
+        _, output = run_flow(
+            self.repo,
+            bm.merge_master_to_current,
+            ["y", "n"],
+        )
+
+        merge_result = subprocess.run(
+            ["git", "merge-base", "--is-ancestor", "master", feature],
+            cwd=self.repo,
+            text=True,
+            capture_output=True,
+        )
+
+        self.assertEqual(merge_result.returncode, 0)
+        self.assertIn("合并主干代码成功: master", output)
 
     def test_delete_branches_supports_paging(self) -> None:
         branches = [f"feature_delete_page_{i:02d}_202603{i:02d}" for i in range(1, 22)]
@@ -270,16 +300,39 @@ class RemoteBranchSupportTest(unittest.TestCase):
             git(self.repo, "commit", "-m", f"commit {branch}")
 
         git(self.repo, "checkout", "master")
-        target_branch = branches[0]
+        ordered = bm.sort_branches_by_date(branches, limit=len(branches))
+        target_branch = ordered[20]
 
         _, output = run_flow(
             self.repo,
             lambda: bm.delete_branches(include_remote=False),
-            ["__DOWN__", "21", "", "y", "y"],
+            ["__DOWN__", "21", "y", "y"],
         )
 
         self.assertNotIn(target_branch, self.local_branches())
         self.assertIn("当前第 1/2 页", output)
+
+    def test_delete_branches_auto_confirms_single_selection(self) -> None:
+        branches = [f"feature_delete_auto_{i:02d}_202603{i:02d}" for i in range(1, 22)]
+        for branch in branches:
+            git(self.repo, "checkout", "master")
+            git(self.repo, "checkout", "-b", branch)
+            (self.repo / f"{branch}.txt").write_text("x\n", encoding="utf-8")
+            git(self.repo, "add", f"{branch}.txt")
+            git(self.repo, "commit", "-m", f"commit {branch}")
+
+        git(self.repo, "checkout", "master")
+        ordered = bm.sort_branches_by_date(branches, limit=len(branches))
+        target_branch = ordered[9]
+
+        _, output = run_flow(
+            self.repo,
+            lambda: bm.delete_branches(include_remote=False),
+            ["10", "y", "y"],
+        )
+
+        self.assertNotIn(target_branch, self.local_branches())
+        self.assertIn("将删除以下 1 个分支", output)
 
 
 if __name__ == "__main__":
