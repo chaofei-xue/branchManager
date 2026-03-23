@@ -668,6 +668,13 @@ REPORT_TRACKING_RE = re.compile(r"^\[DREO-MERGE\]\s+(\S+)\s+<-\s+(.+)$")
 REPORT_MERGE_RE = re.compile(r"^Merge branch '(.+?)' into (.+)$")
 
 
+def parse_git_iso_datetime(value):
+    value = value.strip()
+    if value.endswith('Z'):
+        value = value[:-1] + '+00:00'
+    return datetime.fromisoformat(value)
+
+
 def report_read_commits(*log_args):
     ok, output, err = run_git(
         'log',
@@ -683,7 +690,7 @@ def report_read_commits(*log_args):
         sha, timestamp, subject = line.split('\x1f', 2)
         commits.append({
             'sha': sha,
-            'timestamp': datetime.fromisoformat(timestamp),
+            'timestamp': parse_git_iso_datetime(timestamp),
             'subject': subject,
         })
     return commits
@@ -705,7 +712,7 @@ def report_read_commits_with_parents(*log_args):
         commits.append({
             'sha': sha,
             'parents': [item for item in parents_text.split() if item],
-            'timestamp': datetime.fromisoformat(timestamp),
+            'timestamp': parse_git_iso_datetime(timestamp),
             'subject': subject,
         })
     return commits
@@ -795,7 +802,7 @@ def report_branch_creation_reflog(branch):
             source = action_match.group(1).strip()
         entries.append({
             'sha': sha,
-            'timestamp': datetime.fromisoformat(timestamp_text),
+            'timestamp': parse_git_iso_datetime(timestamp_text),
             'action': action,
             'source': source,
         })
@@ -853,7 +860,7 @@ def report_tracking_commits_for_branch(branch, start_sha=None):
         if REPORT_TRACKING_RE.match(subject):
             results.append({
                 'sha': sha,
-                'timestamp': datetime.fromisoformat(timestamp),
+                'timestamp': parse_git_iso_datetime(timestamp),
                 'subject': subject,
             })
     return results

@@ -34,6 +34,16 @@ def git(repo: Path, *args: str) -> str:
 
 
 class BranchReportTest(unittest.TestCase):
+    def test_parse_git_iso_datetime_supports_utc_z_suffix(self) -> None:
+        dt = bm.parse_git_iso_datetime("2021-07-14T03:42:18Z")
+        self.assertEqual(dt.year, 2021)
+        self.assertEqual(dt.month, 7)
+        self.assertEqual(dt.day, 14)
+        self.assertEqual(dt.hour, 3)
+        self.assertEqual(dt.minute, 42)
+        self.assertEqual(dt.second, 18)
+        self.assertEqual(dt.utcoffset().total_seconds(), 0)
+
     def test_create_branch_time_prefers_reflog_over_merge_base_commit_time(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp) / "repo"
