@@ -23,8 +23,10 @@ import dreo_branch_install as installer
 class BranchInstallTest(unittest.TestCase):
     def make_args(self, root: Path) -> argparse.Namespace:
         source = root / "workspace" / "dreo_branch_manager.py"
+        operate_source = root / "workspace" / "dreo_branch_operate.py"
         source.parent.mkdir(parents=True, exist_ok=True)
         source.write_text("#!/usr/bin/env python3\nprint('v1')\n", encoding="utf-8")
+        operate_source.write_text("#!/usr/bin/env python3\nprint('op')\n", encoding="utf-8")
         return argparse.Namespace(
             action=None,
             home=root / "home",
@@ -64,6 +66,7 @@ class BranchInstallTest(unittest.TestCase):
             zshrc = paths["home"] / ".zshrc"
             self.assertTrue(paths["target_script"].exists())
             self.assertTrue((paths["bin_dir"] / "dreo_branch_manager").exists())
+            self.assertTrue((paths["bin_dir"] / "dreo_branch_operate").exists())
             self.assertIn(installer.INSTALL_MARKER, zshrc.read_text(encoding="utf-8"))
 
             installer.uninstall(args)
@@ -71,6 +74,7 @@ class BranchInstallTest(unittest.TestCase):
             self.assertTrue(args.source.exists())
             self.assertFalse(paths["target_script"].exists())
             self.assertFalse((paths["bin_dir"] / "dreo_branch_manager").exists())
+            self.assertFalse((paths["bin_dir"] / "dreo_branch_operate").exists())
             self.assertNotIn(installer.INSTALL_MARKER, zshrc.read_text(encoding="utf-8"))
 
     def test_activation_command_matches_shell(self) -> None:

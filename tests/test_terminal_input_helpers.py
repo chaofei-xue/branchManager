@@ -99,6 +99,24 @@ class TerminalInputHelpersTest(unittest.TestCase):
 
         self.assertEqual(merged, [f"feature_a_{bm.today_str()}"])
 
+    def test_check_rerere_auto_enables_without_confirmation(self) -> None:
+        calls = []
+
+        def fake_run_git(*args, **kwargs):
+            calls.append(args)
+            if args == ('config', '--local', 'rerere.enabled'):
+                return True, 'false', ''
+            if args == ('config', '--local', 'rerere.enabled', 'true'):
+                return True, '', ''
+            return True, '', ''
+
+        with mock.patch("dreo_branch_manager.run_git", side_effect=fake_run_git), \
+             mock.patch("dreo_branch_manager.confirm") as confirm_mock:
+            bm.check_rerere()
+
+        self.assertIn(('config', '--local', 'rerere.enabled', 'true'), calls)
+        confirm_mock.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

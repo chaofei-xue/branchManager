@@ -401,15 +401,17 @@ def check_git_repo():
 
 
 def check_rerere():
-    """检查 rerere 是否开启，未开启则提示用户"""
+    """检查 rerere 是否开启，未开启则自动在当前仓库启用。"""
     _, val, _ = run_git('config', '--local', 'rerere.enabled')
     if val != 'true':
         print()
-        note("未开启 rerere（冲突记忆）功能。", 'tip')
-        print("  开启后，同一冲突只需手动解决一次，后续合并将自动重用解决方案。")
-        if confirm("现在为此仓库开启 rerere？"):
-            run_git('config', '--local', 'rerere.enabled', 'true')
-            note("rerere 已开启。", 'success')
+        note("检测到当前仓库未开启 rerere（冲突记忆）功能。", 'tip')
+        print("  已为当前仓库自动开启；同一冲突手动解决一次后，后续可自动复用解决方案。")
+        ok, _, err = run_git('config', '--local', 'rerere.enabled', 'true')
+        if ok:
+            note("rerere 已自动开启。", 'success')
+        else:
+            note(f"自动开启 rerere 失败: {err}", 'warn')
 
 
 def get_current_branch():

@@ -3,8 +3,8 @@
 安装 dreo_branch_manager.py 到 macOS / Linux 用户环境。
 
 功能：
-1. 复制 dreo_branch_manager.py 到用户目录。
-2. 生成 dreo_branch_manager / branch / dbm 三个启动命令。
+1. 复制 dreo_branch_manager.py / dreo_branch_operate.py 到用户目录。
+2. 生成 dreo_branch_manager / branch / dbm / dreo_branch_operate 启动命令。
 3. 自动为常见 shell 配置 PATH，确保新终端可直接运行。
 4. 支持安装、更新和卸载。
 """
@@ -21,6 +21,7 @@ from pathlib import Path
 
 APP_NAME = "dreo_branch_manager"
 ALIASES = ("dreo_branch_manager", "branch", "dbm")
+OPERATE_ALIAS = "dreo_branch_operate"
 INSTALL_MARKER = "dreo-branch-manager"
 POSIX_RC_FILES = (".zshrc", ".bashrc", ".bash_profile", ".profile")
 FISH_RC_FILE = ".config/fish/config.fish"
@@ -106,12 +107,16 @@ def resolve_paths(args: argparse.Namespace) -> dict[str, Path]:
     )
     source = args.source.expanduser().resolve()
     target_script = install_dir / "dreo_branch_manager.py"
+    operate_source = source.with_name("dreo_branch_operate.py")
+    target_operate_script = install_dir / "dreo_branch_operate.py"
     return {
         "home": home,
         "source": source,
+        "operate_source": operate_source,
         "install_dir": install_dir,
         "bin_dir": bin_dir,
         "target_script": target_script,
+        "target_operate_script": target_operate_script,
     }
 
 
@@ -163,6 +168,18 @@ def copy_main_script(source: Path, target_script: Path) -> None:
     success(f"已安装主脚本: {target_script}")
 
 
+def copy_optional_script(source: Path, target_script: Path, label: str) -> bool:
+    if not source.is_file():
+        warn(f"未找到{label}，已跳过安装: {source}")
+        return False
+    ensure_dir(target_script.parent)
+    shutil.copy2(source, target_script)
+    mode = target_script.stat().st_mode
+    target_script.chmod(mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    success(f"已安装{label}: {target_script}")
+    return True
+
+
 def launcher_content(target_script: Path) -> str:
     return "\n".join(
         [
@@ -191,6 +208,13 @@ def install_launchers(bin_dir: Path, target_script: Path) -> list[Path]:
         installed.append(launcher)
         success(f"已创建启动命令: {launcher}")
     return installed
+
+
+def install_single_launcher(bin_dir: Path, alias: str, target_script: Path) -> Path:
+    launcher = bin_dir / alias
+    write_file(launcher, launcher_content(target_script), executable=True)
+    success(f"已创建启动命令: {launcher}")
+    return launcher
 
 
 def replace_managed_block(original: str, block: str, begin: str, end: str) -> str:
@@ -351,6 +375,7 @@ def print_summary(paths: dict[str, Path], launchers: list[Path], updated_files: 
     print("  - dreo_branch_manager")
     print("  - branch")
     print("  - dbm")
+    print("  - dreo_branch_operate")
 
 
 def print_update_summary(paths: dict[str, Path], launchers: list[Path], updated_files: list[Path]) -> None:
@@ -405,6 +430,8 @@ def install_or_update(args: argparse.Namespace, action: str) -> None:
 
     copy_main_script(paths["source"], paths["target_script"])
     launchers = install_launchers(paths["bin_dir"], paths["target_script"])
+    if copy_optional_script(paths["operate_source"], paths["target_operate_script"], "参数化操作脚本"):
+        launchers.append(install_single_launcher(paths["bin_dir"], OPERATE_ALIAS, paths["target_operate_script"]))
     updated_files = configure_shell_paths(paths["home"], paths["bin_dir"])
     if action == ACTION_INSTALL:
         print_summary(paths, launchers, updated_files)
@@ -421,6 +448,9 @@ def uninstall(args: argparse.Namespace) -> None:
         launcher = paths["bin_dir"] / alias
         if remove_file_if_exists(launcher, "启动命令"):
             removed_files.append(launcher)
+    operate_launcher = paths["bin_dir"] / OPERATE_ALIAS
+    if remove_file_if_exists(operate_launcher, "启动命令"):
+        removed_files.append(operate_launcher)
 
     if (
         paths["target_script"].exists()
@@ -430,6 +460,13 @@ def uninstall(args: argparse.Namespace) -> None:
             removed_files.append(paths["target_script"])
     elif paths["target_script"].exists():
         warn(f"跳过删除源脚本本体: {paths['target_script']}")
+
+    if (
+        paths["target_operate_script"].exists()
+        and paths["target_operate_script"].resolve() != paths["operate_source"]
+    ):
+        if remove_file_if_exists(paths["target_operate_script"], "参数化操作脚本"):
+            removed_files.append(paths["target_operate_script"])
 
     updated_files = remove_shell_paths(paths["home"])
 
