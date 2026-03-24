@@ -338,6 +338,19 @@ class RemoteBranchSupportTest(unittest.TestCase):
         self.assertNotIn(f"origin/{feature}", remote_branches)
         self.assertIn("是否立即删除这些关联开发分支", output)
 
+    def test_confirm_reprompts_when_input_is_empty(self) -> None:
+        git(self.repo, "checkout", "master")
+        git(self.repo, "checkout", "-b", f"feature_confirm_{TEST_DATE}")
+
+        result, output = run_flow(
+            self.repo,
+            lambda: bm.confirm("是否继续"),
+            ["", "n"],
+        )
+
+        self.assertFalse(result)
+        self.assertIn("请输入 y 或 n", output)
+
     def test_delete_branches_supports_paging(self) -> None:
         branches = [f"feature_delete_page_{i:02d}_202603{i:02d}" for i in range(1, 22)]
         for branch in branches:
