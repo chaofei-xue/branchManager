@@ -309,6 +309,35 @@ class RemoteBranchSupportTest(unittest.TestCase):
         self.assertEqual(merge_result.returncode, 0)
         self.assertIn("合并主干代码成功: master", output)
 
+    def test_merge_release_to_master_can_delete_related_feature_branches(self) -> None:
+        feature = f"feature_release_cleanup_{TEST_DATE}"
+        release = f"release_1.0.0_{TEST_DATE}"
+
+        git(self.repo, "checkout", "master")
+        git(self.repo, "checkout", "-b", feature)
+        (self.repo / "cleanup.txt").write_text("cleanup\n", encoding="utf-8")
+        git(self.repo, "add", "cleanup.txt")
+        git(self.repo, "commit", "-m", "cleanup feature")
+        git(self.repo, "push", "-u", "origin", feature)
+
+        git(self.repo, "checkout", "master")
+        git(self.repo, "checkout", "-b", release)
+        git(self.repo, "merge", "--no-ff", feature, "-m", f"Merge branch '{feature}' into {release}")
+        git(self.repo, "commit", "--allow-empty", "-m", f"{bm.MERGE_TAG} {release} <- {feature}")
+        git(self.repo, "push", "-u", "origin", release)
+        git(self.repo, "checkout", "master")
+
+        _, output = run_flow(
+            self.repo,
+            bm.merge_to_master,
+            ["1", "y", "n", "y"],
+        )
+
+        self.assertNotIn(feature, self.local_branches())
+        remote_branches = git(self.repo, "branch", "-r", "--format=%(refname:short)").splitlines()
+        self.assertNotIn(f"origin/{feature}", remote_branches)
+        self.assertIn("是否立即删除这些关联开发分支", output)
+
     def test_delete_branches_supports_paging(self) -> None:
         branches = [f"feature_delete_page_{i:02d}_202603{i:02d}" for i in range(1, 22)]
         for branch in branches:

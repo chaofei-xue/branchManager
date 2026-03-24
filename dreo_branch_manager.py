@@ -2479,6 +2479,70 @@ def update_integration_branch():
 
 # ─── 功能 4：删除分支 ────────────────────────────────────────────
 
+def delete_named_branches(branches, include_remote=False):
+    local_branches = set(get_local_branches())
+    remote_branches = set(get_remote_branches()) if include_remote else set()
+    current = get_current_branch()
+    base = get_master_branch()
+    protected = {current, base}
+
+    succeeded, failed = [], []
+    for branch in branches:
+        if branch in protected:
+            failed.append(branch)
+            note(f"受保护分支，已跳过: {branch}", 'warn')
+            continue
+
+        local_deleted = False
+        remote_deleted = False
+
+        if branch in local_branches:
+            ok, _, err = run_git('branch', '-d', branch)
+            if not ok:
+                note(f"[{branch}] 包含未合并的提交，无法安全删除。", 'error')
+                if confirm(f"强制删除 [{branch}]？（提交将丢失）"):
+                    ok, _, err = run_git('branch', '-D', branch)
+                else:
+                    failed.append(branch)
+                    print(f"  {icon_slot(UI['skip'], '33')} 已跳过: {branch}")
+                    continue
+
+            if ok:
+                local_deleted = True
+                note(f"本地已删除: {branch}", 'success')
+            else:
+                failed.append(branch)
+                note(f"删除失败: {err}", 'error')
+                continue
+
+        if include_remote and branch in remote_branches:
+            rok, _, rerr = run_git('push', 'origin', '--delete', branch)
+            if rok:
+                remote_deleted = True
+                note(f"远端已删除: {branch}", 'success')
+            else:
+                note(f"远端删除失败: {rerr}", 'warn')
+
+        if local_deleted or remote_deleted:
+            details = []
+            if local_deleted:
+                details.append('本地')
+            if remote_deleted:
+                details.append('远端')
+            succeeded.append(f"{branch}（{' + '.join(details)}）")
+        else:
+            failed.append(branch)
+            note(f"删除失败: {branch}", 'error')
+
+    rows = []
+    if succeeded:
+        rows.append(('✅', f"已删除 ({len(succeeded)}): " + ", ".join(succeeded)))
+    if failed:
+        rows.append(('❌', f"跳过   ({len(failed)}): " + ", ".join(failed)))
+    summary_block("删除结果汇总", rows)
+    return {'succeeded': succeeded, 'failed': failed}
+
+
 def delete_branches(include_remote=False):
     mode = "本地 + 云端" if include_remote else "仅本地"
     header(f"删除分支（{mode}）", icon=UI['delete'])
@@ -2534,55 +2598,7 @@ def delete_branches(include_remote=False):
         note("已取消。", 'warn')
         return False
 
-    succeeded, failed = [], []
-    for branch in selected:
-        local_deleted = False
-        remote_deleted = False
-
-        if branch in local_branches:
-            ok, _, err = run_git('branch', '-d', branch)
-            if not ok:
-                note(f"[{branch}] 包含未合并的提交，无法安全删除。", 'error')
-                if confirm(f"强制删除 [{branch}]？（提交将丢失）"):
-                    ok, _, err = run_git('branch', '-D', branch)
-                else:
-                    failed.append(branch)
-                    print(f"  {icon_slot(UI['skip'], '33')} 已跳过: {branch}")
-                    continue
-
-            if ok:
-                local_deleted = True
-                note(f"本地已删除: {branch}", 'success')
-            else:
-                failed.append(branch)
-                note(f"删除失败: {err}", 'error')
-                continue
-
-        if include_remote and branch in remote_branches:
-            rok, _, rerr = run_git('push', 'origin', '--delete', branch)
-            if rok:
-                remote_deleted = True
-                note(f"远端已删除: {branch}", 'success')
-            else:
-                note(f"远端删除失败: {rerr}", 'warn')
-
-        if local_deleted or remote_deleted:
-            details = []
-            if local_deleted:
-                details.append('本地')
-            if remote_deleted:
-                details.append('远端')
-            succeeded.append(f"{branch}（{' + '.join(details)}）")
-        else:
-            failed.append(branch)
-            note(f"删除失败: {branch}", 'error')
-
-    rows = []
-    if succeeded:
-        rows.append(('✅', f"已删除 ({len(succeeded)}): " + ", ".join(succeeded)))
-    if failed:
-        rows.append(('❌', f"跳过   ({len(failed)}): " + ", ".join(failed)))
-    summary_block("删除结果汇总", rows)
+    delete_named_branches(selected, include_remote=include_remote)
 
 
 # ─── 功能 5：合并发布分支回 master ───────────────────────────────
@@ -2634,6 +2650,19 @@ def merge_to_master():
             base,
             prompt=f"是否将 [{base}] 的最新合并结果推送到远端？",
         )
+        related_features = [
+            branch for branch in get_merged_feature_branches(release_branch)
+            if is_managed_feature_branch(branch)
+        ]
+        if related_features:
+            print(f"\n  {icon_slot(UI['delete'], '36')} 检测到 [{release_branch}] 关联以下开发分支：")
+            print_list([format_branch_with_location(branch) for branch in related_features])
+            if confirm("是否立即删除这些关联开发分支？（本地 + 远端）"):
+                delete_named_branches(related_features, include_remote=True)
+            else:
+                note("已保留关联开发分支，不做删除。", 'tip')
+        else:
+            note(f"未检测到 [{release_branch}] 的关联开发分支记录。", 'tip')
     else:
         note("合并失败或已放弃。", 'error')
 
