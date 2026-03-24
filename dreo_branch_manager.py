@@ -7,6 +7,7 @@ import subprocess
 import sys
 from collections import defaultdict
 from datetime import date, datetime
+from functools import lru_cache
 from html import escape
 import os
 import shutil
@@ -675,6 +676,30 @@ def parse_git_iso_datetime(value):
     return datetime.fromisoformat(value)
 
 
+def report_repo_key():
+    return str(Path.cwd())
+
+
+@lru_cache(maxsize=None)
+def report_branch_sets(repo_key):
+    local = tuple(sorted(get_local_branches()))
+    remote = tuple(sorted(get_remote_branches()))
+    return set(local), set(remote)
+
+
+@lru_cache(maxsize=None)
+def report_branch_head_map(repo_key):
+    branch_map = {}
+    local_branches, remote_branches = report_branch_sets(repo_key)
+    all_branches = sorted(local_branches | remote_branches)
+    for branch in all_branches:
+        ref = branch if branch in local_branches else f'origin/{branch}'
+        ok, output, _ = run_git('rev-parse', ref)
+        if ok:
+            branch_map[branch] = output.strip()
+    return branch_map
+
+
 def report_read_commits(*log_args):
     ok, output, err = run_git(
         'log',
@@ -719,11 +744,62 @@ def report_read_commits_with_parents(*log_args):
 
 
 def report_ref_name(branch):
-    if has_local_branch(branch):
+    local_branches, remote_branches = report_branch_sets(report_repo_key())
+    if branch in local_branches:
         return branch
-    if has_remote_branch(branch):
+    if branch in remote_branches:
         return f'origin/{branch}'
     return branch
+
+
+def report_normalize_creation_source(branch, base, source):
+    if not source:
+        return None
+    source = source.strip()
+    if source == 'HEAD':
+        return 'HEAD'
+    if source.startswith('origin/'):
+        source = source.split('/', 1)[1]
+    if source == branch:
+        return None
+    return source
+
+
+def report_resolve_creation_source_from_sha(branch, base, sha):
+    branch_heads = report_branch_head_map(report_repo_key())
+    candidates = []
+    for candidate, head_sha in branch_heads.items():
+        if candidate == branch:
+            continue
+        if head_sha.startswith(sha):
+            candidates.append(candidate)
+    if not candidates:
+        return base
+    if len(candidates) == 1:
+        return candidates[0]
+    if base in candidates:
+        return base
+    return candidates[0]
+
+
+@lru_cache(maxsize=None)
+def _report_branch_source(repo_key, branch, base):
+    entry = _report_branch_creation_reflog(repo_key, branch)
+    if not entry:
+        return None, None
+    source = report_normalize_creation_source(branch, base, entry.get('source'))
+    if source == 'HEAD':
+        source = report_resolve_creation_source_from_sha(branch, base, entry['sha'])
+    return source, entry
+
+
+def report_branch_source(branch, base):
+    return _report_branch_source(report_repo_key(), branch, base)
+
+
+def report_unique_commits_from_source(source, base, branch):
+    compare_base = source or base
+    return report_first_unique_commits(compare_base, branch)
 
 
 def report_first_unique_commits(base, branch):
@@ -785,7 +861,8 @@ def report_commit_by_sha(sha):
     return commits[0] if commits else None
 
 
-def report_branch_creation_reflog(branch):
+@lru_cache(maxsize=None)
+def _report_branch_creation_reflog(repo_key, branch):
     ok, output, err = run_git('reflog', 'show', '--date=iso-strict', branch)
     if not ok:
         return None
@@ -813,6 +890,10 @@ def report_branch_creation_reflog(branch):
     return entries[-1] if entries else None
 
 
+def report_branch_creation_reflog(branch):
+    return _report_branch_creation_reflog(report_repo_key(), branch)
+
+
 def report_current_branch_merge_commits(current, start_sha):
     revision = f'{start_sha}..{current}' if start_sha else current
     return report_read_commits_with_parents('--reverse', '--merges', '--first-parent', revision)
@@ -828,11 +909,10 @@ def report_resolve_parent_source(base, current, parent_sha):
         return base
 
     candidates = []
-    for branch in sorted(set(get_local_branches() + get_remote_branches())):
+    for branch, head_sha in report_branch_head_map(report_repo_key()).items():
         if branch in (base, current):
             continue
-        ok, output, _ = run_git('rev-parse', report_ref_name(branch))
-        if ok and output.strip() == parent_sha:
+        if head_sha == parent_sha:
             candidates.append(branch)
     return candidates[0] if candidates else None
 
@@ -872,9 +952,10 @@ def collect_report_events():
     branches = get_local_branches()
 
     if current != base:
-        start_sha = report_merge_base(base, current)
+        current_source, create_entry = report_branch_source(current, base)
+        current_compare_base = current_source or base
+        start_sha = report_merge_base(current_compare_base, current)
         start_commit = report_commit_by_sha(start_sha) if start_sha else None
-        create_entry = report_branch_creation_reflog(current)
         events = []
         seen = set()
         merged_sources = []
@@ -883,36 +964,20 @@ def collect_report_events():
         has_current_create_event = False
 
         if create_entry or start_commit:
-            create_source = create_entry.get('source') if create_entry else None
-            base_refs = {base, report_ref_name(base), 'HEAD'}
-            is_from_remote_self = (
-                is_integration_branch(current)
-                and create_source
-                and create_source.startswith('origin/')
-                and create_source.split('/', 1)[1] == current
-            )
-            from_base = (
-                not create_entry
-                or create_source in base_refs
-                or is_from_remote_self
-            )
-            if from_base:
-                if is_from_remote_self and start_commit:
-                    create_timestamp = start_commit['timestamp']
-                    create_sha = start_commit['sha']
-                elif create_entry:
-                    create_timestamp = create_entry['timestamp']
-                    create_sha = create_entry['sha']
-                else:
-                    create_timestamp = start_commit['timestamp']
-                    create_sha = start_commit['sha']
+            if create_entry:
+                create_timestamp = create_entry['timestamp']
+                create_sha = create_entry['sha']
+            else:
+                create_timestamp = start_commit['timestamp']
+                create_sha = start_commit['sha']
+            if create_entry and current_source:
                 events.append({
                     'timestamp': create_timestamp,
                     'sha': create_sha,
                     'kind': 'create_branch',
-                    'description': f"从 {base} 拉出 {current}",
+                    'description': f"从 {current_source} 拉出 {current}",
                     'branch': current,
-                    'source': base,
+                    'source': current_source,
                     'target': current,
                 })
                 has_current_create_event = True
@@ -928,17 +993,19 @@ def collect_report_events():
                 continue
             seen.add(key)
             if not has_current_create_event and index == 0:
-                description = f"从 {base} 拉出 {current}，并提交 {commit['subject']}"
+                description = f"从 {current_compare_base} 拉出 {current}，并提交 {commit['subject']}"
+                source_branch = current_compare_base
             else:
                 description = f"{current} 提交 {commit['subject']}"
+                source_branch = ''
             events.append({
                 'timestamp': commit['timestamp'],
                 'sha': commit['sha'],
                 'kind': 'branch_commit',
                 'description': description,
                 'branch': current,
-                'source': '',
-                'target': '',
+                'source': source_branch,
+                'target': current if source_branch else '',
             })
 
         for commit in report_current_branch_merge_commits(current, start_sha):
@@ -986,14 +1053,16 @@ def collect_report_events():
                 source_branches.append(branch)
 
         for branch in source_branches:
-            unique_commits = report_first_unique_commits(base, branch)
+            branch_source, branch_create_entry = report_branch_source(branch, base)
+            branch_compare_base = branch_source or base
+            unique_commits = report_unique_commits_from_source(branch_source, base, branch)
             for index, commit in enumerate(unique_commits):
                 key = ('branch', branch, commit['sha'])
                 if key in seen:
                     continue
                 seen.add(key)
                 desc = (
-                    f"从 {base} 拉出 {branch}，并提交 {commit['subject']}"
+                    f"从 {branch_compare_base} 拉出 {branch}，并提交 {commit['subject']}"
                     if index == 0 else
                     f"{branch} 提交 {commit['subject']}"
                 )
@@ -1003,22 +1072,21 @@ def collect_report_events():
                     'kind': 'branch_commit',
                     'description': desc,
                     'branch': branch,
-                    'source': '',
-                    'target': '',
+                    'source': branch_compare_base if index == 0 else '',
+                    'target': branch if index == 0 else '',
                 })
 
             if not unique_commits:
-                create_entry = report_branch_creation_reflog(branch)
-                merge_base_sha = report_merge_base(base, branch)
+                merge_base_sha = report_merge_base(branch_compare_base, branch)
                 base_commit = report_commit_by_sha(merge_base_sha) if merge_base_sha else None
-                if create_entry or base_commit:
+                if branch_create_entry or base_commit:
                     events.append({
-                        'timestamp': create_entry['timestamp'] if create_entry else base_commit['timestamp'],
-                        'sha': create_entry['sha'] if create_entry else base_commit['sha'],
+                        'timestamp': branch_create_entry['timestamp'] if branch_create_entry else base_commit['timestamp'],
+                        'sha': branch_create_entry['sha'] if branch_create_entry else base_commit['sha'],
                         'kind': 'create_branch',
-                        'description': f"从 {base} 拉出 {branch}",
+                        'description': f"从 {branch_compare_base} 拉出 {branch}",
                         'branch': branch,
-                        'source': base,
+                        'source': branch_compare_base,
                         'target': branch,
                     })
                 if branch in tracked_source_events and branch not in merged_sources:
@@ -1100,7 +1168,9 @@ def collect_report_events():
     for branch in branches:
         if branch == base or is_integration_branch(branch):
             continue
-        for index, commit in enumerate(report_first_unique_commits(base, branch)):
+        branch_source, _ = report_branch_source(branch, base)
+        branch_compare_base = branch_source or base
+        for index, commit in enumerate(report_unique_commits_from_source(branch_source, base, branch)):
             if start_sha and not report_commit_descends_from(start_sha, commit['sha']):
                 continue
             key = ('branch', branch, commit['sha'])
@@ -1108,7 +1178,7 @@ def collect_report_events():
                 continue
             seen.add(key)
             desc = (
-                f"从 {base} 拉出 {branch}，并提交 {commit['subject']}"
+                f"从 {branch_compare_base} 拉出 {branch}，并提交 {commit['subject']}"
                 if index == 0 else
                 f"{branch} 提交 {commit['subject']}"
             )
@@ -1118,8 +1188,8 @@ def collect_report_events():
                 'kind': 'branch_commit',
                 'description': desc,
                 'branch': branch,
-                'source': '',
-                'target': '',
+                'source': branch_compare_base if index == 0 else '',
+                'target': branch if index == 0 else '',
             })
 
     for commit in report_merge_commits():
@@ -1216,13 +1286,14 @@ def build_report_flowchart(base, branches, events):
     for event in events:
         is_create = (
             event['kind'] == 'create_branch'
-            or (event['kind'] == 'branch_commit' and event['branch'] and event['description'].startswith(f"从 {base} 拉出 "))
+            or (event['kind'] == 'branch_commit' and event.get('source') and event.get('target'))
         )
         if is_create and event.get('branch'):
-            edge = (base, event['branch'], 'create')
+            source_branch = event.get('source') or base
+            edge = (source_branch, event['branch'], 'create')
             if edge not in added_edges:
                 added_edges.add(edge)
-                lines.append(f'    {report_safe_node_id(base)} -->|创建分支| {report_safe_node_id(event["branch"])}')
+                lines.append(f'    {report_safe_node_id(source_branch)} -->|创建分支| {report_safe_node_id(event["branch"])}')
         elif event['kind'] == 'merge' and event['source'] and event['target']:
             edge = (event['source'], event['target'], event['sha'])
             if edge not in added_edges:
@@ -2006,13 +2077,33 @@ def do_merge(source_branch, action_label="合并"):
 # ─── 功能 1：创建开发分支 ─────────────────────────────────────────
 
 def create_feature_branch():
-    header("创建开发分支（从 master）", icon=UI['create_feature'])
+    header("创建开发分支", icon=UI['create_feature'])
     refresh_remote_refs()
 
-    base = get_master_branch()
-    if not base:
+    master_branch = get_master_branch()
+    if not master_branch:
         note("未找到 master / main 分支，请先初始化仓库。", 'error')
         return
+    current_branch = get_current_branch()
+
+    base = master_branch
+    if current_branch != master_branch:
+        print(f"  {icon_slot(UI['type'], '36')} 请选择分支基线：")
+        base_idx = select_one([
+            f'{master_branch}  — 推荐',
+            f'{current_branch}  — 不建议',
+        ], "分支基线")
+        if base_idx is None:
+            return False
+        base = [master_branch, current_branch][base_idx]
+        if base == current_branch:
+            note(f"将基于当前分支 [{current_branch}] 创建新开发分支。", 'warn')
+            note("新分支会继承当前分支的全部代码，可能增加后续集成和报告阅读成本。", 'tip')
+            if not confirm("确认继续使用当前分支作为基线？"):
+                note("已取消。", 'warn')
+                return False
+    else:
+        note(f"当前分支就是 [{master_branch}]，将直接基于它创建。", 'tip')
 
     # 选择分支类型
     print(f"  {icon_slot(UI['type'], '36')} 请选择分支类型：")
@@ -2046,8 +2137,14 @@ def create_feature_branch():
         return
 
     # 切换到 base 并更新
-    if not checkout_and_update_base(base):
-        return
+    if base == master_branch:
+        if not checkout_and_update_base(base):
+            return
+    else:
+        ok, _, err = run_git('checkout', base)
+        if not ok:
+            note(f"切换到基线分支失败: {err}", 'error')
+            return
 
     # 创建新分支
     ok, _, err = run_git('checkout', '-b', branch_name)

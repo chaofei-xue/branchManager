@@ -162,6 +162,7 @@ def create_feature_branches() -> None:
     _, output = run_flow(bm.create_feature_branch, ["1", "test1"])
     assert_true(FEATURE_1 in output, "未成功创建 feature_test1 分支")
 
+    git("checkout", "master")
     _, output = run_flow(bm.create_feature_branch, ["1", "test2"])
     assert_true(FEATURE_2 in output, "未成功创建 feature_test2 分支")
 

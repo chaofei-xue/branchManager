@@ -393,6 +393,44 @@ class BranchReportTest(unittest.TestCase):
 
             self.assertIn(f"从 master 拉出 {feature}，并提交 feature start", content)
 
+    def test_report_uses_actual_parent_branch_as_creation_source(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            repo.mkdir(parents=True, exist_ok=True)
+
+            git(repo, "init", "-b", "master")
+            git(repo, "config", "user.name", "Codex Test")
+            git(repo, "config", "user.email", "codex-test@example.com")
+
+            (repo / "README.md").write_text("m1\n", encoding="utf-8")
+            git(repo, "add", "README.md")
+            git(repo, "commit", "-m", "m1")
+
+            parent = "feature_parent_20260323"
+            child = "feature_child_20260323"
+
+            git(repo, "checkout", "-b", parent)
+            (repo / "parent.txt").write_text("parent\n", encoding="utf-8")
+            git(repo, "add", "parent.txt")
+            git(repo, "commit", "-m", "parent start")
+
+            git(repo, "checkout", "-b", child)
+            (repo / "child.txt").write_text("child\n", encoding="utf-8")
+            git(repo, "add", "child.txt")
+            git(repo, "commit", "-m", "child start")
+
+            output = repo / "report.html"
+            previous = Path.cwd()
+            try:
+                os.chdir(repo)
+                bm.generate_branch_report(output)
+            finally:
+                os.chdir(previous)
+            content = output.read_text(encoding="utf-8")
+
+            self.assertIn(f"从 {parent} 拉出 {child}", content)
+            self.assertNotIn(f"从 master 拉出 {child}", content)
+
 
 if __name__ == "__main__":
     unittest.main()

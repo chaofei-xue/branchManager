@@ -128,6 +128,25 @@ class RemoteBranchSupportTest(unittest.TestCase):
         self.assertIn("检测到同名远端分支", output)
         self.assertIn(branch, self.local_branches())
 
+    def test_create_feature_branch_can_use_current_branch_as_base(self) -> None:
+        parent = f"feature_parent_{TEST_DATE}"
+        git(self.repo, "checkout", "master")
+        git(self.repo, "checkout", "-b", parent)
+        (self.repo / "parent.txt").write_text("parent\n", encoding="utf-8")
+        git(self.repo, "add", "parent.txt")
+        git(self.repo, "commit", "-m", "parent commit")
+
+        _, output = run_flow(
+            self.repo,
+            bm.create_feature_branch,
+            ["2", "y", "1", "child", "n"],
+        )
+
+        child = f"feature_child_{TEST_DATE}"
+        self.assertIn(f"已创建并切换到: {child}  (基于 {parent})", output)
+        self.assertEqual(git(self.repo, "rev-parse", "--abbrev-ref", "HEAD"), child)
+        self.assertTrue((self.repo / "parent.txt").exists())
+
     def test_create_integration_branch_can_merge_remote_only_feature(self) -> None:
         feature = f"feature_alpha_{TEST_DATE}"
         integration = f"dev_1.0.0_{TEST_DATE}"
