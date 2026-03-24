@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 
@@ -277,6 +278,66 @@ class RemoteBranchSupportTest(unittest.TestCase):
         )
 
         self.assertIn(target_branch, self.local_branches())
+
+    def test_pull_remote_branch_to_local_reads_local_branches_once_for_display(self) -> None:
+        calls = {"local": 0}
+
+        original_refresh = bm.refresh_remote_refs
+        original_get_remote = bm.get_remote_branches
+        original_get_local = bm.get_local_branches
+        original_select_one = bm.select_one
+
+        def fake_get_local():
+            calls["local"] += 1
+            return ["master"]
+
+        try:
+            bm.refresh_remote_refs = lambda: True
+            bm.get_remote_branches = lambda: ["feature_alpha_20260319", "feature_beta_20260319"]
+            bm.get_local_branches = fake_get_local
+            bm.select_one = lambda options, prompt="请选择": None
+
+            with pushd(self.repo), contextlib.redirect_stdout(io.StringIO()):
+                bm.pull_remote_branch_to_local()
+        finally:
+            bm.refresh_remote_refs = original_refresh
+            bm.get_remote_branches = original_get_remote
+            bm.get_local_branches = original_get_local
+            bm.select_one = original_select_one
+
+        self.assertEqual(calls["local"], 1)
+
+    def test_delete_branches_reads_branch_sets_once_for_display(self) -> None:
+        calls = {"local": 0, "remote": 0}
+
+        original_get_local = bm.get_local_branches
+        original_get_remote = bm.get_remote_branches
+        original_select_many = bm.select_many
+
+        def fake_get_local():
+            calls["local"] += 1
+            return ["master", "feature_alpha_20260319"]
+
+        def fake_get_remote():
+            calls["remote"] += 1
+            return ["feature_alpha_20260319", "feature_beta_20260319"]
+
+        try:
+            bm.get_local_branches = fake_get_local
+            bm.get_remote_branches = fake_get_remote
+            bm.select_many = lambda options, prompt="", auto_confirm_single=False: None
+
+            with pushd(self.repo), contextlib.redirect_stdout(io.StringIO()):
+                bm.delete_branches(include_remote=True)
+        finally:
+            bm.get_local_branches = original_get_local
+            bm.get_remote_branches = original_get_remote
+            bm.select_many = original_select_many
+
+        # 删除分支页仍会为受保护分支判断读取一次基线分支信息，
+        # 这里验证的是“不会按分支数量重复查询”，因此约束为常数次读取。
+        self.assertLessEqual(calls["local"], 2)
+        self.assertLessEqual(calls["remote"], 2)
 
     def test_merge_master_to_current_branch(self) -> None:
         feature = f"feature_merge_base_{TEST_DATE}"

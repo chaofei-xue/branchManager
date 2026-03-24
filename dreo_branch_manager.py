@@ -492,6 +492,20 @@ def format_branch_with_location(branch):
     return f"{branch}  [{branch_location_label(branch)}]"
 
 
+def format_branch_with_sets(branch, local_branches, remote_branches):
+    local = branch in local_branches
+    remote = branch in remote_branches
+    if local and remote:
+        label = '本地 + 远端'
+    elif local:
+        label = '仅本地'
+    elif remote:
+        label = '仅远端'
+    else:
+        label = '不存在'
+    return f"{branch}  [{label}]"
+
+
 def branch_counts(prefixes):
     local = {
         b for b in get_local_branches()
@@ -2594,38 +2608,39 @@ def delete_branches(include_remote=False):
     mode = "本地 + 云端" if include_remote else "仅本地"
     header(f"删除分支（{mode}）", icon=UI['delete'])
 
-    local_branches = set(get_local_branches())
-    remote_branches = set(get_remote_branches()) if include_remote else set()
-    all_branches = sorted(local_branches | remote_branches)
-    current = get_current_branch()
-    base = get_master_branch()
+    with LoadingIndicator("正在整理可删除分支列表"):
+        local_branches = set(get_local_branches())
+        remote_branches = set(get_remote_branches()) if include_remote else set()
+        all_branches = sorted(local_branches | remote_branches)
+        current = get_current_branch()
+        base = get_master_branch()
 
-    # 排除当前分支和 master/main
-    protected = {current, base}
-    deletable = [b for b in all_branches if b not in protected]
+        # 排除当前分支和 master/main
+        protected = {current, base}
+        deletable = [b for b in all_branches if b not in protected]
 
-    if not deletable:
-        note("没有可删除的分支。", 'error')
-        note(f"当前分支 [{current}] 和 [{base}] 受保护，不可删除。", 'tip')
-        return
+        if not deletable:
+            note("没有可删除的分支。", 'error')
+            note(f"当前分支 [{current}] 和 [{base}] 受保护，不可删除。", 'tip')
+            return
 
-    # 按类型分组展示，方便选择
-    feature_bs = [b for b in deletable if b.startswith('feature_') or b.startswith('bugfix_')]
-    int_bs     = [b for b in deletable if b.startswith('dev_') or b.startswith('release_')]
-    other_bs   = [b for b in deletable if b not in feature_bs and b not in int_bs]
+        # 按类型分组展示，方便选择
+        feature_bs = [b for b in deletable if b.startswith('feature_') or b.startswith('bugfix_')]
+        int_bs     = [b for b in deletable if b.startswith('dev_') or b.startswith('release_')]
+        other_bs   = [b for b in deletable if b not in feature_bs and b not in int_bs]
 
-    # 按分组顺序构建列表，复用分页多选逻辑
-    ordered = []
-    display_options = []
-    groups = [
-        ('开发分支', sort_branches_by_date(feature_bs, limit=len(feature_bs))),
-        ('集成分支', sort_branches_by_date(int_bs,     limit=len(int_bs))),
-        ('其他分支', other_bs),
-    ]
-    for group_name, branches in groups:
-        for b in branches:
-            ordered.append(b)
-            display_options.append(f"{group_name}｜{format_branch_with_location(b)}")
+        # 按分组顺序构建列表，复用分页多选逻辑
+        ordered = []
+        display_options = []
+        groups = [
+            ('开发分支', sort_branches_by_date(feature_bs, limit=len(feature_bs))),
+            ('集成分支', sort_branches_by_date(int_bs,     limit=len(int_bs))),
+            ('其他分支', other_bs),
+        ]
+        for group_name, branches in groups:
+            for b in branches:
+                ordered.append(b)
+                display_options.append(f"{group_name}｜{format_branch_with_sets(b, local_branches, remote_branches)}")
 
     note(f"当前分支 [{current}] 和 [{base}] 受保护，不在列表中。", 'tip')
     print(f"  {icon_slot(UI['delete'], '36')} 选择要删除的分支：")
@@ -2639,7 +2654,7 @@ def delete_branches(include_remote=False):
     selected = [ordered[i] for i in selected_indices]
 
     print(f"\n  {icon_slot(UI['records'], '36')} 将删除以下 {len(selected)} 个分支：")
-    print_list([format_branch_with_location(branch) for branch in selected])
+    print_list([format_branch_with_sets(branch, local_branches, remote_branches) for branch in selected])
     note("此操作不可恢复，请确认分支代码已合并或不再需要。", 'warn')
     if not confirm("确认删除？"):
         note("已取消。", 'warn')
@@ -2767,9 +2782,11 @@ def pull_remote_branch_to_local():
     header("拉取远端分支到本地", icon='📥')
     refresh_remote_refs()
 
+    remote_branches = get_remote_branches()
+    local_branches = set(get_local_branches())
     remote_only = [
-        branch for branch in get_remote_branches()
-        if not has_local_branch(branch)
+        branch for branch in remote_branches
+        if branch not in local_branches
     ]
     remote_only = sort_branches_by_date(remote_only, limit=len(remote_only))
 
@@ -2778,7 +2795,7 @@ def pull_remote_branch_to_local():
         return
 
     print(f"  {icon_slot(UI['select'], '36')} 请选择要拉取到本地的远端分支：")
-    idx = select_one([branch_display_name(branch) for branch in remote_only])
+    idx = select_one([f"{branch}  [远端]" for branch in remote_only])
     if idx is None:
         return False
 
