@@ -200,6 +200,40 @@ class RemoteBranchSupportTest(unittest.TestCase):
         self.assertIn(integration, self.local_branches())
         self.assertIn("已同步 (1)", output)
 
+    def test_update_integration_branch_prefers_remote_branch_over_stale_local(self) -> None:
+        feature = f"feature_remote_preferred_{TEST_DATE}"
+        integration = f"dev_2.1.0_{TEST_DATE}"
+
+        git(self.repo, "checkout", "master")
+        git(self.repo, "checkout", "-b", feature)
+        (self.repo / "sync.txt").write_text("v1\n", encoding="utf-8")
+        git(self.repo, "add", "sync.txt")
+        git(self.repo, "commit", "-m", "feature v1")
+        git(self.repo, "push", "-u", "origin", feature)
+
+        git(self.repo, "checkout", "master")
+        git(self.repo, "checkout", "-b", integration)
+        git(self.repo, "merge", "--no-ff", feature, "-m", f"Merge branch '{feature}' into {integration}")
+        git(self.repo, "commit", "--allow-empty", "-m", f"{bm.MERGE_TAG} {integration} <- {feature}")
+        git(self.repo, "push", "-u", "origin", integration)
+
+        git(self.repo, "checkout", feature)
+        (self.repo / "sync.txt").write_text("v2\n", encoding="utf-8")
+        git(self.repo, "commit", "-am", "feature v2")
+        git(self.repo, "push", "origin", feature)
+        git(self.repo, "reset", "--hard", "HEAD~1")
+
+        git(self.repo, "checkout", integration)
+        _, output = run_flow(
+            self.repo,
+            bm.update_integration_branch,
+            ["1", "y", "n"],
+        )
+
+        self.assertIn("本地 + 远端，更新时将优先使用远端", output)
+        self.assertIn("已同步 (1)", output)
+        self.assertEqual((self.repo / "sync.txt").read_text(encoding="utf-8"), "v2\n")
+
     def test_pull_remote_branch_to_local(self) -> None:
         branch = f"feature_pull_{TEST_DATE}"
         self.create_remote_feature(branch, "pull me")

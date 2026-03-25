@@ -508,6 +508,11 @@ def format_branch_with_sets(branch, local_branches, remote_branches):
     return f"{branch}  [{label}]"
 
 
+def branch_source_ref(branch):
+    """同步/合并时优先使用远端分支，避免本地分支落后导致漏合并。"""
+    return f"origin/{branch}" if has_remote_branch(branch) else branch
+
+
 def branch_counts(prefixes):
     local = {
         b for b in get_local_branches()
@@ -2108,13 +2113,14 @@ def _has_merge_conflict(stdout, stderr):
     return 'CONFLICT' in combined or '冲突' in combined or get_unmerged_files()
 
 
-def do_merge(source_branch, action_label="合并"):
+def do_merge(source_branch, action_label="合并", display_branch=None):
     """将 source_branch 合并到当前分支，处理冲突。返回是否成功。"""
     current = get_current_branch()
-    print(f"\n  {icon_slot(UI['merge'], '36')} {action_label} [{source_branch}] → [{current}] ...")
+    label = display_branch or source_branch
+    print(f"\n  {icon_slot(UI['merge'], '36')} {action_label} [{label}] → [{current}] ...")
     ok, out, err = run_git('merge', '--no-ff', source_branch)
     if ok:
-        note(f"{action_label}成功: {source_branch}", 'success')
+        note(f"{action_label}成功: {label}", 'success')
         return True
     if _has_merge_conflict(out, err):
         run_git('rerere')
@@ -2127,11 +2133,11 @@ def do_merge(source_branch, action_label="合并"):
         if not still_conflict:
             commit_ok, _, commit_err = run_git('commit', '--no-edit')
             if commit_ok:
-                note(f"rerere 自动重用了历史解决方案，{action_label}完成: {source_branch}", 'success')
+                note(f"rerere 自动重用了历史解决方案，{action_label}完成: {label}", 'success')
                 note("请检查自动解决的文件是否符合预期。", 'tip')
                 return True
             note(f"自动提交失败: {commit_err}", 'error')
-        return handle_conflict(source_branch, action_label=action_label)
+        return handle_conflict(label, action_label=action_label)
     note(f"{action_label}失败: {err or out}", 'error')
     return False
 
@@ -2463,10 +2469,12 @@ def update_integration_branch():
     print(f"\n  {icon_slot(UI['records'], '36')} 检测到以下开发分支曾被集成到 [{int_branch}]：")
     branch_lines = []
     for b in merged_branches:
-        if has_local_branch(b):
-            tag = ''
+        if has_remote_branch(b) and has_local_branch(b):
+            tag = ' [本地 + 远端，更新时将优先使用远端]'
         elif has_remote_branch(b):
-            tag = ' [仅远端存在，将先拉到本地]'
+            tag = ' [仅远端存在，更新时将直接使用远端]'
+        elif has_local_branch(b):
+            tag = ' [仅本地存在]'
         else:
             tag = ' [本地与远端均不存在，将跳过]'
         branch_lines.append(f"{b}{tag}")
@@ -2498,10 +2506,15 @@ def update_integration_branch():
 
     succeeded, failed, skipped = [], [], []
     for branch in existing:
-        if not ensure_local_branch(branch):
+        if not has_local_branch(branch) and has_remote_branch(branch):
+            if not ensure_local_branch(branch):
+                failed.append(branch)
+                continue
+        elif not branch_available(branch):
             failed.append(branch)
             continue
-        _, ahead, _ = run_git('rev-list', '--count', f'{int_branch}..{branch}')
+        source_ref = branch_source_ref(branch)
+        _, ahead, _ = run_git('rev-list', '--count', f'{int_branch}..{source_ref}')
         new_commits = int(ahead) if ahead.isdigit() else 0
 
         if new_commits == 0:
@@ -2510,7 +2523,7 @@ def update_integration_branch():
             continue
 
         print(f"\n  {icon_slot(UI['merge'], '36')} [{branch}] 有 {new_commits} 个新提交，执行合并...")
-        if do_merge(branch):
+        if do_merge(source_ref, display_branch=branch):
             succeeded.append(branch)
         else:
             failed.append(branch)
