@@ -199,6 +199,7 @@ class RemoteBranchSupportTest(unittest.TestCase):
         self.assertIn(feature, self.local_branches())
         self.assertIn(integration, self.local_branches())
         self.assertIn("已同步 (1)", output)
+        self.assertIn("最新提交: feature v2", output)
 
     def test_update_integration_branch_prefers_remote_branch_over_stale_local(self) -> None:
         feature = f"feature_remote_preferred_{TEST_DATE}"
@@ -232,6 +233,7 @@ class RemoteBranchSupportTest(unittest.TestCase):
 
         self.assertIn("本地 + 远端，更新时将优先使用远端", output)
         self.assertIn("已同步 (1)", output)
+        self.assertIn("最新提交: feature v2", output)
         self.assertEqual((self.repo / "sync.txt").read_text(encoding="utf-8"), "v2\n")
 
     def test_pull_remote_branch_to_local(self) -> None:

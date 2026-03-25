@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from datetime import date
 from pathlib import Path
 
 
@@ -95,7 +96,7 @@ class BranchOperateTest(unittest.TestCase):
         self.assertEqual(ancestor.returncode, 0)
 
     def test_operate_create_feature_fails_fast_when_local_branch_exists(self) -> None:
-        branch = "feature_test1_20260324"
+        branch = f"feature_test1_{date.today().strftime('%Y%m%d')}"
         git(self.repo, "checkout", "-b", branch)
         git(self.repo, "checkout", "master")
 

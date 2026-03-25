@@ -513,6 +513,11 @@ def branch_source_ref(branch):
     return f"origin/{branch}" if has_remote_branch(branch) else branch
 
 
+def latest_commit_subject(ref):
+    ok, output, _ = run_git('log', '-1', '--pretty=format:%s', ref)
+    return output.strip() if ok else ''
+
+
 def branch_counts(prefixes):
     local = {
         b for b in get_local_branches()
@@ -2522,7 +2527,9 @@ def update_integration_branch():
             skipped.append(branch)
             continue
 
-        print(f"\n  {icon_slot(UI['merge'], '36')} [{branch}] 有 {new_commits} 个新提交，执行合并...")
+        latest_subject = latest_commit_subject(source_ref)
+        latest_info = f"；最新提交: {latest_subject}" if latest_subject else ""
+        print(f"\n  {icon_slot(UI['merge'], '36')} [{branch}] 有 {new_commits} 个新提交{latest_info}，执行合并...")
         if do_merge(source_ref, display_branch=branch):
             succeeded.append(branch)
         else:
