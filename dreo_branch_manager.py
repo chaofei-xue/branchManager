@@ -6,7 +6,7 @@ Dreo 分支管理工具
 import subprocess
 import sys
 from collections import defaultdict
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from functools import lru_cache
 from html import escape
 import os
@@ -17,6 +17,7 @@ import threading
 import time
 import unicodedata
 from pathlib import Path
+import atexit
 
 try:
     import termios
@@ -24,6 +25,14 @@ try:
 except ImportError:  # pragma: no cover
     termios = None
     tty = None
+
+
+def _restore_tty():
+    if termios and tty and sys.stdin.isatty():
+        os.system('stty sane 2>/dev/null')
+
+
+atexit.register(_restore_tty)
 
 
 def today_str():
@@ -69,7 +78,10 @@ MERGE_TAG = '[DREO-MERGE]'
 
 _ANSI_RE = re.compile(r'\033\[[0-9;]*m')
 
-_BRANCH_NAME_INVALID_CHARS = set(' ~^:?*[\\')
+
+def is_valid_branch_name(name):
+    ok, _, _ = run_git('check-ref-format', '--branch', name, capture=True)
+    return ok
 
 
 def paint(text, *codes):
@@ -364,14 +376,24 @@ def ensure_git_success(ok, err, action):
     return False
 
 
-def has_origin_remote():
-    ok, _, _ = run_git('remote', 'get-url', 'origin')
+@lru_cache(maxsize=1)
+def get_default_remote():
+    ok, out, _ = run_git('remote')
+    if not ok or not out:
+        return 'origin'
+    remotes = [line.strip() for line in out.splitlines() if line.strip()]
+    return 'origin' if 'origin' in remotes else (remotes[0] if remotes else 'origin')
+
+
+def has_default_remote():
+    remote = get_default_remote()
+    ok, _, _ = run_git('remote', 'get-url', remote)
     return ok
 
 
 def offer_push_branch(branch, set_upstream=False, prompt=None):
-    if not has_origin_remote():
-        note("未检测到 origin 远端，已跳过推送。", 'tip')
+    if not has_default_remote():
+        note(f"未检测到 {get_default_remote()} 远端，已跳过推送。", 'tip')
         return False
 
     message = prompt or f"是否立即推送 [{branch}] 到远端？"
@@ -380,10 +402,11 @@ def offer_push_branch(branch, set_upstream=False, prompt=None):
         return False
 
     with LoadingIndicator(f"正在推送分支 [{branch}] 到远端"):
+        remote = get_default_remote()
         if set_upstream:
-            ok, _, err = run_git('push', '-u', 'origin', branch)
+            ok, _, err = run_git('push', '-u', remote, branch)
         else:
-            ok, _, err = run_git('push', 'origin', branch)
+            ok, _, err = run_git('push', remote, branch)
 
     if ok:
         note(f"已推送到远端: {branch}", 'success')
@@ -425,18 +448,19 @@ def get_local_branches():
 
 
 def get_remote_branches():
-    if not has_origin_remote():
+    if not has_default_remote():
         return []
     ok, output, _ = run_git('branch', '-r', '--format=%(refname:short)')
     if not ok:
         return []
 
     branches = []
+    remote = get_default_remote()
     for line in output.splitlines():
         name = line.strip()
         if not name or name.endswith('/HEAD'):
             continue
-        if name.startswith('origin/'):
+        if name.startswith(f'{remote}/'):
             branches.append(name.split('/', 1)[1])
     return branches
 
@@ -450,10 +474,11 @@ def is_managed_integration_branch(branch):
 
 
 def refresh_remote_refs():
-    if not has_origin_remote():
+    if not has_default_remote():
         return False
+    remote = get_default_remote()
     with LoadingIndicator("正在刷新远端分支信息"):
-        ok, _, err = run_git('fetch', 'origin', '--prune')
+        ok, _, err = run_git('fetch', remote, '--prune')
     if not ok:
         note(f"拉取远端分支引用失败，继续使用本地缓存的远端信息: {err}", 'warn')
         return False
@@ -510,7 +535,8 @@ def format_branch_with_sets(branch, local_branches, remote_branches):
 
 def branch_source_ref(branch):
     """同步/合并时优先使用远端分支，避免本地分支落后导致漏合并。"""
-    return f"origin/{branch}" if has_remote_branch(branch) else branch
+    remote = get_default_remote()
+    return f"{remote}/{branch}" if has_remote_branch(branch) else branch
 
 
 def latest_commit_subject(ref):
@@ -518,21 +544,15 @@ def latest_commit_subject(ref):
     return output.strip() if ok else ''
 
 
-def branch_counts(prefixes):
-    local = {
-        b for b in get_local_branches()
-        if b.startswith(prefixes)
-        and (is_managed_feature_branch(b) if prefixes == ('feature_', 'bugfix_') else is_managed_integration_branch(b))
-    }
-    remote = {
-        b for b in get_remote_branches()
-        if b.startswith(prefixes)
-        and (is_managed_feature_branch(b) if prefixes == ('feature_', 'bugfix_') else is_managed_integration_branch(b))
-    }
+def branch_counts(prefixes, validator, local_branches=None, remote_branches=None):
+    local_s = set(local_branches) if local_branches is not None else set(get_local_branches())
+    remote_s = set(remote_branches) if remote_branches is not None else set(get_remote_branches())
+    local_m = {b for b in local_s if b.startswith(prefixes) and validator(b)}
+    remote_m = {b for b in remote_s if b.startswith(prefixes) and validator(b)}
     return {
-        'local': len(local),
-        'remote': len(remote),
-        'total': len(local | remote),
+        'local': len(local_m),
+        'remote': len(remote_m),
+        'total': len(local_m | remote_m),
     }
 
 
@@ -547,14 +567,15 @@ def ensure_local_branch(branch, checkout=False):
         note(f"未找到分支: {branch}", 'error')
         return False
 
+    remote = get_default_remote()
     if checkout:
-        ok, _, err = run_git('checkout', '-b', branch, '--track', f'origin/{branch}')
+        ok, _, err = run_git('checkout', '-b', branch, '--track', f'{remote}/{branch}')
         if ensure_git_success(ok, err, f"从远端创建并切换到 [{branch}]"):
             note(f"已从远端创建本地跟踪分支: {branch}", 'success')
             return True
         return False
 
-    ok, _, err = run_git('branch', '--track', branch, f'origin/{branch}')
+    ok, _, err = run_git('branch', '--track', branch, f'{remote}/{branch}')
     if ensure_git_success(ok, err, f"从远端创建本地分支 [{branch}]"):
         note(f"已从远端创建本地跟踪分支: {branch}", 'success')
         return True
@@ -764,8 +785,9 @@ def report_branch_head_map(repo_key):
     branch_map = {}
     local_branches, remote_branches = report_branch_sets(repo_key)
     all_branches = sorted(local_branches | remote_branches)
+    remote = get_default_remote()
     for branch in all_branches:
-        ref = branch if branch in local_branches else f'origin/{branch}'
+        ref = branch if branch in local_branches else f'{remote}/{branch}'
         ok, output, _ = run_git('rev-parse', ref)
         if ok:
             branch_map[branch] = output.strip()
@@ -784,7 +806,10 @@ def report_read_commits(*log_args):
 
     commits = []
     for line in output.splitlines():
-        sha, timestamp, subject = line.split('\x1f', 2)
+        parts = line.split('\x1f', 2)
+        if len(parts) != 3:
+            continue
+        sha, timestamp, subject = parts
         commits.append({
             'sha': sha,
             'timestamp': parse_git_iso_datetime(timestamp),
@@ -805,7 +830,10 @@ def report_read_commits_with_parents(*log_args):
 
     commits = []
     for line in output.splitlines():
-        sha, parents_text, timestamp, subject = line.split('\x1f', 3)
+        parts = line.split('\x1f', 3)
+        if len(parts) != 4:
+            continue
+        sha, parents_text, timestamp, subject = parts
         commits.append({
             'sha': sha,
             'parents': [item for item in parents_text.split() if item],
@@ -820,7 +848,8 @@ def report_ref_name(branch):
     if branch in local_branches:
         return branch
     if branch in remote_branches:
-        return f'origin/{branch}'
+        remote = get_default_remote()
+        return f'{remote}/{branch}'
     return branch
 
 
@@ -830,7 +859,8 @@ def report_normalize_creation_source(branch, base, source):
     source = source.strip()
     if source == 'HEAD':
         return 'HEAD'
-    if source.startswith('origin/'):
+    remote = get_default_remote()
+    if source.startswith(f'{remote}/'):
         source = source.split('/', 1)[1]
     if source == branch:
         return None
@@ -1008,7 +1038,10 @@ def report_tracking_commits_for_branch(branch, start_sha=None):
 
     results = []
     for line in output.splitlines():
-        sha, timestamp, subject = line.split('\x1f', 2)
+        parts = line.split('\x1f', 2)
+        if len(parts) != 3:
+            continue
+        sha, timestamp, subject = parts
         if REPORT_TRACKING_RE.match(subject):
             results.append({
                 'sha': sha,
@@ -1196,7 +1229,6 @@ def collect_report_events():
         if first_merge_time:
             for event in events:
                 if event['kind'] == 'create_branch' and event['branch'] == current and event['timestamp'] >= first_merge_time:
-                    from datetime import timedelta
                     event['timestamp'] = first_merge_time - timedelta(seconds=1)
 
         events.sort(key=lambda item: (item['timestamp'], item['sha'], item['kind']))
@@ -1700,8 +1732,8 @@ def build_branch_report_html():
     branches = report_branch_order(base, get_local_branches(), events, current=current)
     start_sha = report_merge_base(base, current) if current != base else None
     generated_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    feature_counts = branch_counts(('feature_', 'bugfix_'))
-    integration_counts = branch_counts(('dev_', 'release_'))
+    feature_counts = branch_counts(('feature_', 'bugfix_'), is_managed_feature_branch)
+    integration_counts = branch_counts(('dev_', 'release_'), is_managed_integration_branch)
 
     branch_chips = ''.join(
         f'<span class="branch-chip">{escape(branch)}</span>' for branch in report_branch_order(base, branches, events, current=current)
@@ -2035,7 +2067,15 @@ def build_branch_report():
     return build_branch_report_markdown()
 
 
+def clear_report_cache():
+    report_branch_sets.cache_clear()
+    report_branch_head_map.cache_clear()
+    _report_branch_source.cache_clear()
+    _report_branch_creation_reflog.cache_clear()
+
+
 def generate_branch_report(output_path=None):
+    clear_report_cache()
     output = Path(output_path) if output_path else Path.cwd() / 'branch_merge_report.md'
     if output.suffix.lower() == '.html':
         content = build_branch_report_html()
@@ -2194,10 +2234,10 @@ def create_feature_branch():
         )
         if not name:
             return False
-        if any(c in name for c in _BRANCH_NAME_INVALID_CHARS):
-            note("包含非法字符，请重新输入。", 'warn')
-            continue
         branch_name = f"{branch_type}_{name}_{date_suffix}"
+        if not is_valid_branch_name(branch_name):
+            note("分支名称包含非法字符或不符合 Git 规范，请重新输入。", 'warn')
+            continue
         if has_local_branch(branch_name):
             note(f"分支 '{branch_name}' 已存在，请换一个名称。", 'error')
             continue
@@ -2285,8 +2325,9 @@ def checkout_and_update_base(base):
     print(f"\n  {icon_slot(UI['checkout'], '36')} 切换到 {base}，同步最新代码...")
     if not ensure_local_branch(base, checkout=True):
         return False
+    remote = get_default_remote()
     with LoadingIndicator(f"正在同步 {base} 最新代码"):
-        ok, _, _ = run_git('pull', 'origin', base)
+        ok, _, _ = run_git('pull', remote, base)
     if not ok:
         note(f"拉取远端失败，使用本地 {base} 继续。", 'warn')
     return True
@@ -2343,12 +2384,12 @@ def create_integration_branch():
         )
         if not version:
             return False
-        if any(c in version for c in _BRANCH_NAME_INVALID_CHARS):
-            note("包含非法字符，请重新输入。", 'warn')
+        int_branch = f"{env_prefix}_{version}_{date_suffix}"
+        if not is_valid_branch_name(int_branch):
+            note("包含非法字符或不符合 Git 规范，请重新输入。", 'warn')
             continue
         break
 
-    int_branch = f"{env_prefix}_{version}_{date_suffix}"
     if has_local_branch(int_branch):
         note(f"分支 '{int_branch}' 已存在，请使用「2.3 添加新的开发分支」功能。", 'error')
         return
@@ -2468,17 +2509,19 @@ def update_integration_branch():
         note(f"仅识别通过本工具合并（含 {MERGE_TAG} 标志）的分支。", 'tip')
         return
 
-    existing = [b for b in merged_branches if branch_available(b)]
-    missing  = [b for b in merged_branches if not branch_available(b)]
+    local_set = set(get_local_branches())
+    remote_set = set(get_remote_branches())
+    existing = [b for b in merged_branches if b in local_set or b in remote_set]
+    missing  = [b for b in merged_branches if b not in local_set and b not in remote_set]
 
     print(f"\n  {icon_slot(UI['records'], '36')} 检测到以下开发分支曾被集成到 [{int_branch}]：")
     branch_lines = []
     for b in merged_branches:
-        if has_remote_branch(b) and has_local_branch(b):
+        if b in remote_set and b in local_set:
             tag = ' [本地 + 远端，更新时将优先使用远端]'
-        elif has_remote_branch(b):
+        elif b in remote_set:
             tag = ' [仅远端存在，更新时将直接使用远端]'
-        elif has_local_branch(b):
+        elif b in local_set:
             tag = ' [仅本地存在]'
         else:
             tag = ' [本地与远端均不存在，将跳过]'
@@ -2511,11 +2554,12 @@ def update_integration_branch():
 
     succeeded, failed, skipped = [], [], []
     for branch in existing:
-        if not has_local_branch(branch) and has_remote_branch(branch):
+        if branch not in local_set and branch in remote_set:
             if not ensure_local_branch(branch):
                 failed.append(branch)
                 continue
-        elif not branch_available(branch):
+            local_set.add(branch)
+        elif branch not in local_set and branch not in remote_set:
             failed.append(branch)
             continue
         source_ref = branch_source_ref(branch)
@@ -2595,7 +2639,8 @@ def delete_named_branches(branches, include_remote=False):
                 continue
 
         if include_remote and branch in remote_branches:
-            rok, _, rerr = run_git('push', 'origin', '--delete', branch)
+            remote = get_default_remote()
+            rok, _, rerr = run_git('push', remote, '--delete', branch)
             if rok:
                 remote_deleted = True
                 note(f"远端已删除: {branch}", 'success')
@@ -2714,8 +2759,9 @@ def merge_to_master():
         note(f"切换到 {base} 失败: {err}", 'error')
         return
 
+    remote = get_default_remote()
     with LoadingIndicator(f"正在同步 {base} 最新代码"):
-        ok, _, _ = run_git('pull', 'origin', base)
+        ok, _, _ = run_git('pull', remote, base)
     if not ok:
         note(f"拉取远端失败，使用本地 {base} 继续。", 'warn')
 
@@ -2818,7 +2864,8 @@ def pull_remote_branch_to_local():
         return False
 
     branch = remote_only[idx]
-    print(f"\n  {icon_slot('📥', '36')} 操作：origin/{branch} → 本地 {branch}")
+    remote = get_default_remote()
+    print(f"\n  {icon_slot('📥', '36')} 操作：{remote}/{branch} → 本地 {branch}")
     if not confirm("确认拉取并切换到该分支？"):
         note("已取消。", 'warn')
         return False
@@ -2831,8 +2878,10 @@ def pull_remote_branch_to_local():
 
 def show_status():
     current = get_current_branch()
-    features = branch_counts(('feature_', 'bugfix_'))
-    integrations = branch_counts(('dev_', 'release_'))
+    local_set = set(get_local_branches())
+    remote_set = set(get_remote_branches())
+    features = branch_counts(('feature_', 'bugfix_'), is_managed_feature_branch, local_set, remote_set)
+    integrations = branch_counts(('dev_', 'release_'), is_managed_integration_branch, local_set, remote_set)
     branch_text = paint(current, '1', '37')
     print()
     print(f"  {icon_slot(UI['current_branch'], '32')} 当前分支: {branch_text}\n")
