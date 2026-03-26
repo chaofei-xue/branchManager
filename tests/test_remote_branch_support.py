@@ -103,6 +103,17 @@ class RemoteBranchSupportTest(unittest.TestCase):
     def local_branches(self) -> set[str]:
         return set(git(self.repo, "branch", "--format=%(refname:short)").splitlines())
 
+    def tracking_subjects(self, branch_name: str) -> list[str]:
+        log = git(
+            self.repo,
+            "log",
+            "--all",
+            "-F",
+            f"--grep={bm.MERGE_TAG} {branch_name} <-",
+            "--pretty=format:%s",
+        )
+        return [line for line in log.splitlines() if line.strip()]
+
     def create_remote_feature(self, name: str, message: str) -> None:
         git(self.repo, "checkout", "master")
         git(self.repo, "checkout", "-b", name)
@@ -189,6 +200,7 @@ class RemoteBranchSupportTest(unittest.TestCase):
         git(self.repo, "checkout", "master")
         git(self.repo, "branch", "-D", feature)
         git(self.repo, "branch", "-D", integration)
+        previous_tracking = self.tracking_subjects(integration)
 
         _, output = run_flow(
             self.repo,
@@ -200,6 +212,7 @@ class RemoteBranchSupportTest(unittest.TestCase):
         self.assertIn(integration, self.local_branches())
         self.assertIn("已同步 (1)", output)
         self.assertIn("最新提交: feature v2", output)
+        self.assertEqual(self.tracking_subjects(integration), previous_tracking)
 
     def test_update_integration_branch_prefers_remote_branch_over_stale_local(self) -> None:
         feature = f"feature_remote_preferred_{TEST_DATE}"

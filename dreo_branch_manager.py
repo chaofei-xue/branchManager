@@ -2535,10 +2535,6 @@ def update_integration_branch():
         else:
             failed.append(branch)
 
-    # 同步后更新追踪提交（记录本次实际同步的分支）
-    if succeeded:
-        write_tracking_commit(int_branch, succeeded)
-
     rows = []
     if base_sync_status == 'success':
         rows.append(('🔄', f"已同步最新主干代码: {base}"))

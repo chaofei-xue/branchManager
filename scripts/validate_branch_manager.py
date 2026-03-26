@@ -196,6 +196,7 @@ def create_conflicting_commits() -> None:
 
 def update_and_abort_conflict() -> None:
     global FIRST_SYNC_SUCCESS_BRANCH, FIRST_SYNC_FAILED_BRANCH
+    previous_subjects = tracking_subjects(DEV_350)
     _, output = run_flow(bm.update_integration_branch, [integration_choice(DEV_350), "y", "2"])
     assert_true("已同步最新主干代码: master" in output, "更新集成分支时未先同步 master")
     success_branch = next((branch for branch in (FEATURE_1, FEATURE_2) if f"已同步 (1): {branch}" in output), None)
@@ -205,8 +206,8 @@ def update_and_abort_conflict() -> None:
     FIRST_SYNC_SUCCESS_BRANCH = success_branch
     FIRST_SYNC_FAILED_BRANCH = failed_branch
     assert_true(
-        latest_tracking_subject(DEV_350) == f"{bm.MERGE_TAG} {DEV_350} <- {success_branch}",
-        "追踪提交应该只记录成功更新的分支",
+        tracking_subjects(DEV_350) == previous_subjects,
+        "更新已有集成分支时不应新增追踪提交",
     )
     git("checkout", DEV_350)
     assert_true((TEST_REPO / BASELINE_FILE).exists(), "集成分支未同步 master 的新增文件")
@@ -222,13 +223,14 @@ def resolve_current_conflict(_prompt: str) -> None:
 
 
 def update_and_resolve_conflict() -> None:
+    previous_subjects = tracking_subjects(DEV_350)
     _, output = run_flow(bm.update_integration_branch, [integration_choice(DEV_350), "y", resolve_current_conflict, "1"])
     assert_true("冲突已解决，合并完成" in output, "手动解决冲突路径未完成")
     assert_true(FIRST_SYNC_SUCCESS_BRANCH is not None and FIRST_SYNC_FAILED_BRANCH is not None, "首次同步结果未记录")
     assert_true(f"无变更 (1): {FIRST_SYNC_SUCCESS_BRANCH}" in output, "首次已同步分支本应在第二次更新时被跳过")
     assert_true(
-        latest_tracking_subject(DEV_350) == f"{bm.MERGE_TAG} {DEV_350} <- {FIRST_SYNC_FAILED_BRANCH}",
-        "手动解决后，最新追踪提交应该只记录首次失败的分支",
+        tracking_subjects(DEV_350) == previous_subjects,
+        "手动解决更新冲突后不应新增追踪提交",
     )
     git("checkout", DEV_350)
     assert_true(
