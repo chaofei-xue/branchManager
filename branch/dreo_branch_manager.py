@@ -5,10 +5,9 @@ Dreo 分支管理工具
 
 import subprocess
 import sys
-from collections import defaultdict
+import json
 from datetime import date, datetime, timedelta
 from functools import lru_cache
-from html import escape
 import os
 import shutil
 import codecs
@@ -39,6 +38,30 @@ atexit.register(_restore_tty)
 
 def today_str():
     return date.today().strftime('%Y%m%d')
+
+
+APP_VERSION = "2026.04.14"
+INSTALL_METADATA_FILE = "dreo_branch_manager_meta.json"
+
+
+def install_metadata_path():
+    return Path(__file__).resolve().with_name(INSTALL_METADATA_FILE)
+
+
+def load_install_metadata():
+    path = install_metadata_path()
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding='utf-8'))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def current_version_label():
+    metadata = load_install_metadata()
+    revision = str(metadata.get('source_revision') or '').strip()
+    return revision or APP_VERSION
 
 
 USE_COLOR = sys.stdout.isatty() and os.environ.get('TERM', '') != 'dumb'
@@ -1459,6 +1482,111 @@ def generate_branch_report_menu():
     note("HTML 报告包含可视化时间线和分支流转图，建议优先查看。", 'tip')
 
 
+def run_git_in_repo(repo, *args):
+    result = subprocess.run(
+        ['git', *args],
+        cwd=repo,
+        text=True,
+        capture_output=True,
+    )
+    return result.returncode == 0, result.stdout.strip(), result.stderr.strip()
+
+
+def git_output_in_repo(repo, *args):
+    ok, out, _ = run_git_in_repo(repo, *args)
+    return out if ok else ''
+
+
+def resolve_script_update_source():
+    current_script = Path(__file__).resolve()
+    candidates = []
+    metadata = load_install_metadata()
+    if metadata:
+        candidates.append({
+            'repo': metadata.get('source_repo', ''),
+            'branch': metadata.get('source_repo_branch', ''),
+            'remote_name': metadata.get('source_remote_name', ''),
+            'source_script': metadata.get('source_script', ''),
+            'install_script': metadata.get('source_install_script', ''),
+        })
+
+    local_install = current_script.with_name('dreo_branch_install.py')
+    local_repo = git_output_in_repo(current_script.parent, 'rev-parse', '--show-toplevel')
+    if local_install.exists() and local_repo:
+        candidates.append({
+            'repo': local_repo,
+            'branch': git_output_in_repo(current_script.parent, 'rev-parse', '--abbrev-ref', 'HEAD'),
+            'remote_name': 'origin' if git_output_in_repo(current_script.parent, 'remote', 'get-url', 'origin') else '',
+            'source_script': str(current_script),
+            'install_script': str(local_install),
+        })
+
+    for item in candidates:
+        repo = Path(str(item.get('repo') or '')).expanduser()
+        source_script = Path(str(item.get('source_script') or '')).expanduser()
+        install_script = Path(str(item.get('install_script') or '')).expanduser()
+        if repo.is_dir() and source_script.is_file() and install_script.is_file():
+            return {
+                'repo': repo,
+                'branch': str(item.get('branch') or '').strip(),
+                'remote_name': str(item.get('remote_name') or '').strip(),
+                'source_script': source_script,
+                'install_script': install_script,
+            }
+    return None
+
+
+def update_script_menu():
+    header("更新脚本", icon=UI['build'])
+    source = resolve_script_update_source()
+    if not source:
+        note("未找到脚本源码仓库信息，无法自动更新。请先重新执行安装器。", 'error')
+        return False
+
+    repo = source['repo']
+    branch = source['branch']
+    remote_name = source['remote_name']
+    source_script = source['source_script']
+    install_script = source['install_script']
+
+    if not branch or branch == 'HEAD':
+        note("源码仓库当前不在可更新的本地分支上，无法自动更新。", 'error')
+        return False
+    if not remote_name:
+        note("源码仓库未配置可用远端，无法自动更新。", 'error')
+        return False
+
+    note(f"源码仓库: {repo}", 'tip')
+    note(f"更新分支: {branch}", 'tip')
+    with LoadingIndicator("正在从脚本仓库拉取最新代码"):
+        ok, _, err = run_git_in_repo(repo, 'fetch', remote_name)
+        if not ok:
+            note(f"拉取远端信息失败: {err}", 'error')
+            return False
+        ok, _, err = run_git_in_repo(repo, 'pull', '--ff-only', remote_name, branch)
+        if not ok:
+            note(f"更新源码仓库失败: {err}", 'error')
+            return False
+
+    with LoadingIndicator("正在更新已安装脚本"):
+        result = subprocess.run(
+            [sys.executable, str(install_script), '--action', 'update', '--source', str(source_script)],
+            text=True,
+            capture_output=True,
+        )
+    if result.stdout.strip():
+        print(result.stdout.strip())
+    if result.returncode != 0:
+        if result.stderr.strip():
+            print(result.stderr.strip(), file=sys.stderr)
+        note("安装器更新失败。", 'error')
+        return False
+
+    note(f"当前版本: {current_version_label()}", 'success')
+    note("脚本已更新，重新启动后可使用新版本。", 'tip')
+    return True
+
+
 # ─── 冲突处理 ────────────────────────────────────────────────────
 
 
@@ -2304,6 +2432,7 @@ def main():
     print()
     sep('━')
     print(f"  {accent(UI['app'] + '  Dreo 分支管理工具')}")
+    print(f"  版本: {paint(current_version_label(), '1', '33')}")
     print("  开发分支用于功能开发与缺陷修复，集成分支用于联调、验证与发布。")
     print("  建议在干净工作区中使用；重复冲突场景建议开启 rerere。")
     sep('━')
@@ -2317,6 +2446,7 @@ def main():
         ("拉取远端分支到本地",               pull_remote_branch_to_local),
         ("合并 master 到当前分支",           merge_master_to_current),
         ("合并集成分支到 master",            merge_to_master),
+        ("更新脚本",                        update_script_menu),
         ("生成分支处理报告",                 generate_branch_report_menu),
         ("删除分支",                        menu_delete),
     ]

@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 import tempfile
@@ -45,10 +46,12 @@ class BranchInstallTest(unittest.TestCase):
 
             installer.install_or_update(args, installer.ACTION_INSTALL)
             paths = installer.resolve_paths(args)
+            metadata = json.loads(paths["metadata_path"].read_text(encoding="utf-8"))
             self.assertEqual(
                 paths["target_script"].read_text(encoding="utf-8"),
                 "#!/usr/bin/env python3\nprint('v1')\n",
             )
+            self.assertEqual(Path(metadata["source_script"]).resolve(), args.source.resolve())
 
             args.source.write_text("#!/usr/bin/env python3\nprint('v2')\n", encoding="utf-8")
             installer.install_or_update(args, installer.ACTION_UPDATE)
@@ -69,6 +72,7 @@ class BranchInstallTest(unittest.TestCase):
             zshrc = paths["home"] / ".zshrc"
             self.assertTrue(paths["target_script"].exists())
             self.assertTrue(paths["target_report_template"].exists())
+            self.assertTrue(paths["metadata_path"].exists())
             self.assertTrue((paths["bin_dir"] / "dreo_branch_manager").exists())
             self.assertTrue((paths["bin_dir"] / "dreo_branch_operate").exists())
             self.assertIn(installer.INSTALL_MARKER, zshrc.read_text(encoding="utf-8"))
@@ -78,6 +82,7 @@ class BranchInstallTest(unittest.TestCase):
             self.assertTrue(args.source.exists())
             self.assertFalse(paths["target_script"].exists())
             self.assertFalse(paths["target_report_template"].exists())
+            self.assertFalse(paths["metadata_path"].exists())
             self.assertFalse((paths["bin_dir"] / "dreo_branch_manager").exists())
             self.assertFalse((paths["bin_dir"] / "dreo_branch_operate").exists())
             self.assertNotIn(installer.INSTALL_MARKER, zshrc.read_text(encoding="utf-8"))

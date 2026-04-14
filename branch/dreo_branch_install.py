@@ -12,10 +12,13 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shutil
 import stat
+import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 
 
@@ -28,6 +31,7 @@ FISH_RC_FILE = ".config/fish/config.fish"
 ACTION_INSTALL = "install"
 ACTION_UPDATE = "update"
 ACTION_UNINSTALL = "uninstall"
+METADATA_FILE = "dreo_branch_manager_meta.json"
 
 
 def note(message: str) -> None:
@@ -111,6 +115,7 @@ def resolve_paths(args: argparse.Namespace) -> dict[str, Path]:
     target_operate_script = install_dir / "dreo_branch_operate.py"
     report_template_source = source.with_name("branch_report_templates.py")
     target_report_template = install_dir / "branch_report_templates.py"
+    metadata_path = install_dir / METADATA_FILE
     return {
         "home": home,
         "source": source,
@@ -121,7 +126,49 @@ def resolve_paths(args: argparse.Namespace) -> dict[str, Path]:
         "target_script": target_script,
         "target_operate_script": target_operate_script,
         "target_report_template": target_report_template,
+        "metadata_path": metadata_path,
     }
+
+
+def git_output(cwd: Path, *args: str) -> str:
+    result = subprocess.run(
+        ["git", *args],
+        cwd=cwd,
+        text=True,
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        return ""
+    return result.stdout.strip()
+
+
+def build_install_metadata(paths: dict[str, Path]) -> dict[str, str]:
+    source_dir = paths["source"].parent
+    source_repo = git_output(source_dir, "rev-parse", "--show-toplevel")
+    source_branch = git_output(source_dir, "rev-parse", "--abbrev-ref", "HEAD")
+    source_revision = git_output(source_dir, "rev-parse", "--short", "HEAD")
+    remote_name = "origin" if git_output(source_dir, "remote", "get-url", "origin") else ""
+    return {
+        "source_script": str(paths["source"]),
+        "source_install_script": str(paths["source"].with_name("dreo_branch_install.py")),
+        "source_operate_script": str(paths["operate_source"]),
+        "source_report_template": str(paths["report_template_source"]),
+        "source_repo": source_repo,
+        "source_repo_branch": source_branch,
+        "source_remote_name": remote_name,
+        "source_revision": source_revision,
+        "updated_at": datetime.now().isoformat(timespec="seconds"),
+    }
+
+
+def write_install_metadata(paths: dict[str, Path]) -> None:
+    metadata = build_install_metadata(paths)
+    ensure_dir(paths["metadata_path"].parent)
+    paths["metadata_path"].write_text(
+        json.dumps(metadata, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    success(f"已写入安装元信息: {paths['metadata_path']}")
 
 
 def ensure_source_exists(source: Path) -> None:
@@ -437,6 +484,7 @@ def install_or_update(args: argparse.Namespace, action: str) -> None:
     launchers = install_launchers(paths["bin_dir"], paths["target_script"])
     if copy_optional_script(paths["operate_source"], paths["target_operate_script"], "参数化操作脚本"):
         launchers.append(install_single_launcher(paths["bin_dir"], OPERATE_ALIAS, paths["target_operate_script"]))
+    write_install_metadata(paths)
     updated_files = configure_shell_paths(paths["home"], paths["bin_dir"])
     if action == ACTION_INSTALL:
         print_summary(paths, launchers, updated_files)
@@ -479,6 +527,8 @@ def uninstall(args: argparse.Namespace) -> None:
     ):
         if remove_file_if_exists(paths["target_report_template"], "报告模板脚本"):
             removed_files.append(paths["target_report_template"])
+    if remove_file_if_exists(paths["metadata_path"], "安装元信息"):
+        removed_files.append(paths["metadata_path"])
 
     updated_files = remove_shell_paths(paths["home"])
 
