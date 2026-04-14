@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -32,6 +33,7 @@ ACTION_INSTALL = "install"
 ACTION_UPDATE = "update"
 ACTION_UNINSTALL = "uninstall"
 METADATA_FILE = "dreo_branch_manager_meta.json"
+VERSION_RE = re.compile(r'^APP_VERSION\s*=\s*[\'"]([^\'"]+)[\'"]', re.MULTILINE)
 
 
 def note(message: str) -> None:
@@ -142,11 +144,21 @@ def git_output(cwd: Path, *args: str) -> str:
     return result.stdout.strip()
 
 
+def extract_app_version(source: Path) -> str:
+    try:
+        content = source.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+    match = VERSION_RE.search(content)
+    return match.group(1).strip() if match else ""
+
+
 def build_install_metadata(paths: dict[str, Path]) -> dict[str, str]:
     source_dir = paths["source"].parent
     source_repo = git_output(source_dir, "rev-parse", "--show-toplevel")
     source_branch = git_output(source_dir, "rev-parse", "--abbrev-ref", "HEAD")
     source_revision = git_output(source_dir, "rev-parse", "--short", "HEAD")
+    source_version = extract_app_version(paths["source"])
     remote_name = "origin" if git_output(source_dir, "remote", "get-url", "origin") else ""
     return {
         "source_script": str(paths["source"]),
@@ -157,6 +169,7 @@ def build_install_metadata(paths: dict[str, Path]) -> dict[str, str]:
         "source_repo_branch": source_branch,
         "source_remote_name": remote_name,
         "source_revision": source_revision,
+        "source_version": source_version,
         "updated_at": datetime.now().isoformat(timespec="seconds"),
     }
 

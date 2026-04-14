@@ -28,7 +28,7 @@ class BranchInstallTest(unittest.TestCase):
         operate_source = root / "workspace" / "dreo_branch_operate.py"
         report_template = root / "workspace" / "branch_report_templates.py"
         source.parent.mkdir(parents=True, exist_ok=True)
-        source.write_text("#!/usr/bin/env python3\nprint('v1')\n", encoding="utf-8")
+        source.write_text("#!/usr/bin/env python3\nAPP_VERSION = \"0.0.1\"\nprint('v1')\n", encoding="utf-8")
         operate_source.write_text("#!/usr/bin/env python3\nprint('op')\n", encoding="utf-8")
         report_template.write_text("def render_html_report(**kwargs):\n    return 'html'\n\ndef render_markdown_report(**kwargs):\n    return 'md'\n", encoding="utf-8")
         return argparse.Namespace(
@@ -49,17 +49,20 @@ class BranchInstallTest(unittest.TestCase):
             metadata = json.loads(paths["metadata_path"].read_text(encoding="utf-8"))
             self.assertEqual(
                 paths["target_script"].read_text(encoding="utf-8"),
-                "#!/usr/bin/env python3\nprint('v1')\n",
+                "#!/usr/bin/env python3\nAPP_VERSION = \"0.0.1\"\nprint('v1')\n",
             )
             self.assertEqual(Path(metadata["source_script"]).resolve(), args.source.resolve())
+            self.assertEqual(metadata["source_version"], "0.0.1")
 
-            args.source.write_text("#!/usr/bin/env python3\nprint('v2')\n", encoding="utf-8")
+            args.source.write_text("#!/usr/bin/env python3\nAPP_VERSION = \"0.0.2\"\nprint('v2')\n", encoding="utf-8")
             installer.install_or_update(args, installer.ACTION_UPDATE)
 
             self.assertEqual(
                 paths["target_script"].read_text(encoding="utf-8"),
-                "#!/usr/bin/env python3\nprint('v2')\n",
+                "#!/usr/bin/env python3\nAPP_VERSION = \"0.0.2\"\nprint('v2')\n",
             )
+            metadata = json.loads(paths["metadata_path"].read_text(encoding="utf-8"))
+            self.assertEqual(metadata["source_version"], "0.0.2")
 
     def test_uninstall_removes_installed_files_but_keeps_source(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

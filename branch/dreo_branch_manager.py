@@ -40,7 +40,7 @@ def today_str():
     return date.today().strftime('%Y%m%d')
 
 
-APP_VERSION = "2026.04.14"
+APP_VERSION = "0.0.1"
 INSTALL_METADATA_FILE = "dreo_branch_manager_meta.json"
 
 
@@ -60,8 +60,8 @@ def load_install_metadata():
 
 def current_version_label():
     metadata = load_install_metadata()
-    revision = str(metadata.get('source_revision') or '').strip()
-    return revision or APP_VERSION
+    version = str(metadata.get('source_version') or '').strip()
+    return version or APP_VERSION
 
 
 USE_COLOR = sys.stdout.isatty() and os.environ.get('TERM', '') != 'dumb'
