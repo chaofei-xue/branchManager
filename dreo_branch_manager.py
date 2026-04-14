@@ -2529,8 +2529,12 @@ def update_integration_branch():
     print_list(branch_lines)
 
     if not existing:
-        note("所有已集成的开发分支在本地均不存在，无法同步。", 'error')
-        return
+        note("所有已集成的开发分支都已删除或不可用，本次无可同步内容，已跳过。", 'warn')
+        summary_block("同步结果汇总", [
+            ('⏭️', f"无可同步的已集成开发分支: {int_branch}"),
+            (UI['integration_branch'], f"当前所在集成分支: {get_current_branch()}"),
+        ])
+        return True
     if missing:
         note(f"{len(missing)} 个分支本地不存在，将跳过。", 'warn')
 

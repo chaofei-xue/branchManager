@@ -156,6 +156,38 @@ class BranchOperateTest(unittest.TestCase):
         )
         self.assertNotEqual(merge_head.returncode, 0)
 
+    def test_operate_update_succeeds_when_tracked_branches_were_deleted(self) -> None:
+        feature = "feature_deleted_20260319"
+        integration = "dev_3.6.0_20260319"
+
+        git(self.repo, "checkout", "-b", feature)
+        (self.repo / "deleted.txt").write_text("v1\n", encoding="utf-8")
+        git(self.repo, "add", "deleted.txt")
+        git(self.repo, "commit", "-m", "feature v1")
+        git(self.repo, "push", "-u", "origin", feature)
+
+        git(self.repo, "checkout", "master")
+        git(self.repo, "checkout", "-b", integration)
+        git(self.repo, "merge", "--no-ff", feature, "-m", f"Merge branch '{feature}' into {integration}")
+        git(self.repo, "commit", "--allow-empty", "-m", f"[DREO-MERGE] {integration} <- {feature}")
+        git(self.repo, "push", "-u", "origin", integration)
+
+        git(self.repo, "checkout", "master")
+        git(self.repo, "branch", "-D", feature)
+        git(self.repo, "push", "origin", "--delete", feature)
+
+        result = subprocess.run(
+            [sys.executable, str(OPERATE), "2", "2", integration],
+            cwd=self.repo,
+            text=True,
+            capture_output=True,
+        )
+
+        self.assertEqual(result.returncode, 0, msg=result.stdout + "\n" + result.stderr)
+        self.assertIn("所有已集成的开发分支都已删除或不可用", result.stdout)
+        self.assertIn("执行结果: 成功", result.stdout)
+        self.assertTrue(result.stdout.strip().endswith("DREO_RESULT=SUCCESS"))
+
 
 if __name__ == "__main__":
     unittest.main()
