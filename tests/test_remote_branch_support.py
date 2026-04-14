@@ -18,7 +18,8 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
+CODE_ROOT = ROOT / "branch" if (ROOT / "branch").exists() else ROOT
+sys.path.insert(0, str(CODE_ROOT))
 
 import dreo_branch_manager as bm
 

@@ -11,6 +11,8 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+CODE_ROOT = ROOT / "branch" if (ROOT / "branch").exists() else ROOT
+sys.path.insert(0, str(CODE_ROOT))
 sys.path.insert(0, str(ROOT))
 
 from scripts.validate_branch_manager import TEST_REPO, run_validation

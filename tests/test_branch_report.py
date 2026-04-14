@@ -14,7 +14,8 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
+CODE_ROOT = ROOT / "branch" if (ROOT / "branch").exists() else ROOT
+sys.path.insert(0, str(CODE_ROOT))
 
 import dreo_branch_manager as bm
 
@@ -276,6 +277,38 @@ class BranchReportTest(unittest.TestCase):
 
             self.assertIn(feature, content)
             self.assertIn(integration, content)
+
+    def test_report_does_not_fail_when_tracked_branch_was_deleted_everywhere(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            repo.mkdir(parents=True, exist_ok=True)
+
+            git(repo, "init", "-b", "master")
+            git(repo, "config", "user.name", "Codex Test")
+            git(repo, "config", "user.email", "codex-test@example.com")
+
+            feature = "feature_test_20260414"
+            integration = "dev_test_20260414"
+
+            (repo / "README.md").write_text("m1\n", encoding="utf-8")
+            git(repo, "add", "README.md")
+            git(repo, "commit", "-m", "m1")
+
+            git(repo, "checkout", "-b", integration)
+            git(repo, "commit", "--allow-empty", "-m", f"[DREO-MERGE] {integration} <- {feature}")
+
+            output = repo / "report.html"
+            previous = Path.cwd()
+            try:
+                os.chdir(repo)
+                bm.generate_branch_report(output)
+            finally:
+                os.chdir(previous)
+            content = output.read_text(encoding="utf-8")
+
+            self.assertIn(integration, content)
+            self.assertIn(feature, content)
+            self.assertIn("[DREO-MERGE] dev_test_20260414 &lt;- feature_test_20260414", content)
 
     def test_report_detects_merge_with_custom_commit_subject(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

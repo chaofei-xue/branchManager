@@ -14,7 +14,8 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-OPERATE = ROOT / "dreo_branch_operate.py"
+CODE_ROOT = ROOT / "branch" if (ROOT / "branch").exists() else ROOT
+OPERATE = CODE_ROOT / "dreo_branch_operate.py"
 
 
 def git(repo: Path, *args: str, check: bool = True) -> str:

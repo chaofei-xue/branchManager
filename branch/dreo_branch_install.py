@@ -3,7 +3,7 @@
 安装 dreo_branch_manager.py 到 macOS / Linux 用户环境。
 
 功能：
-1. 复制 dreo_branch_manager.py / dreo_branch_operate.py 到用户目录。
+1. 复制 dreo_branch_manager.py / dreo_branch_operate.py / branch_report_templates.py 到用户目录。
 2. 生成 dreo_branch_manager / branch / dbm / dreo_branch_operate 启动命令。
 3. 自动为常见 shell 配置 PATH，确保新终端可直接运行。
 4. 支持安装、更新和卸载。
@@ -109,14 +109,18 @@ def resolve_paths(args: argparse.Namespace) -> dict[str, Path]:
     target_script = install_dir / "dreo_branch_manager.py"
     operate_source = source.with_name("dreo_branch_operate.py")
     target_operate_script = install_dir / "dreo_branch_operate.py"
+    report_template_source = source.with_name("branch_report_templates.py")
+    target_report_template = install_dir / "branch_report_templates.py"
     return {
         "home": home,
         "source": source,
         "operate_source": operate_source,
+        "report_template_source": report_template_source,
         "install_dir": install_dir,
         "bin_dir": bin_dir,
         "target_script": target_script,
         "target_operate_script": target_operate_script,
+        "target_report_template": target_report_template,
     }
 
 
@@ -429,6 +433,7 @@ def install_or_update(args: argparse.Namespace, action: str) -> None:
     ensure_dir(paths["bin_dir"])
 
     copy_main_script(paths["source"], paths["target_script"])
+    copy_optional_script(paths["report_template_source"], paths["target_report_template"], "报告模板脚本")
     launchers = install_launchers(paths["bin_dir"], paths["target_script"])
     if copy_optional_script(paths["operate_source"], paths["target_operate_script"], "参数化操作脚本"):
         launchers.append(install_single_launcher(paths["bin_dir"], OPERATE_ALIAS, paths["target_operate_script"]))
@@ -467,6 +472,13 @@ def uninstall(args: argparse.Namespace) -> None:
     ):
         if remove_file_if_exists(paths["target_operate_script"], "参数化操作脚本"):
             removed_files.append(paths["target_operate_script"])
+
+    if (
+        paths["target_report_template"].exists()
+        and paths["target_report_template"].resolve() != paths["report_template_source"]
+    ):
+        if remove_file_if_exists(paths["target_report_template"], "报告模板脚本"):
+            removed_files.append(paths["target_report_template"])
 
     updated_files = remove_shell_paths(paths["home"])
 

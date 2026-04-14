@@ -15,7 +15,8 @@ from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
+CODE_ROOT = ROOT / "branch" if (ROOT / "branch").exists() else ROOT
+sys.path.insert(0, str(CODE_ROOT))
 
 import dreo_branch_install as installer
 
@@ -24,9 +25,11 @@ class BranchInstallTest(unittest.TestCase):
     def make_args(self, root: Path) -> argparse.Namespace:
         source = root / "workspace" / "dreo_branch_manager.py"
         operate_source = root / "workspace" / "dreo_branch_operate.py"
+        report_template = root / "workspace" / "branch_report_templates.py"
         source.parent.mkdir(parents=True, exist_ok=True)
         source.write_text("#!/usr/bin/env python3\nprint('v1')\n", encoding="utf-8")
         operate_source.write_text("#!/usr/bin/env python3\nprint('op')\n", encoding="utf-8")
+        report_template.write_text("def render_html_report(**kwargs):\n    return 'html'\n\ndef render_markdown_report(**kwargs):\n    return 'md'\n", encoding="utf-8")
         return argparse.Namespace(
             action=None,
             home=root / "home",
@@ -65,6 +68,7 @@ class BranchInstallTest(unittest.TestCase):
 
             zshrc = paths["home"] / ".zshrc"
             self.assertTrue(paths["target_script"].exists())
+            self.assertTrue(paths["target_report_template"].exists())
             self.assertTrue((paths["bin_dir"] / "dreo_branch_manager").exists())
             self.assertTrue((paths["bin_dir"] / "dreo_branch_operate").exists())
             self.assertIn(installer.INSTALL_MARKER, zshrc.read_text(encoding="utf-8"))
@@ -73,6 +77,7 @@ class BranchInstallTest(unittest.TestCase):
 
             self.assertTrue(args.source.exists())
             self.assertFalse(paths["target_script"].exists())
+            self.assertFalse(paths["target_report_template"].exists())
             self.assertFalse((paths["bin_dir"] / "dreo_branch_manager").exists())
             self.assertFalse((paths["bin_dir"] / "dreo_branch_operate").exists())
             self.assertNotIn(installer.INSTALL_MARKER, zshrc.read_text(encoding="utf-8"))

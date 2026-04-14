@@ -15,6 +15,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+CODE_ROOT = ROOT / "branch" if (ROOT / "branch").exists() else ROOT
 TEST_REPO = ROOT / ".tmp_branch_manager_validation"
 TEST_DATE = "20260310"
 
@@ -29,7 +30,7 @@ RESOLVED_MASTER_README_TEXT = "master 分支修改 README\nfeature test1 修改\
 FIRST_SYNC_SUCCESS_BRANCH = None
 FIRST_SYNC_FAILED_BRANCH = None
 
-sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(CODE_ROOT))
 
 import dreo_branch_manager as bm
 
