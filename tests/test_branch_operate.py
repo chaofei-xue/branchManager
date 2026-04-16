@@ -96,6 +96,40 @@ class BranchOperateTest(unittest.TestCase):
         )
         self.assertEqual(ancestor.returncode, 0)
 
+    def test_operate_updates_integration_branch_and_pushes_when_requested(self) -> None:
+        feature = "feature_push_20260319"
+        integration = "dev_3.6.1_20260319"
+
+        git(self.repo, "checkout", "-b", feature)
+        (self.repo / "push.txt").write_text("v1\n", encoding="utf-8")
+        git(self.repo, "add", "push.txt")
+        git(self.repo, "commit", "-m", "feature v1")
+        git(self.repo, "push", "-u", "origin", feature)
+
+        git(self.repo, "checkout", "master")
+        git(self.repo, "checkout", "-b", integration)
+        git(self.repo, "merge", "--no-ff", feature, "-m", f"Merge branch '{feature}' into {integration}")
+        git(self.repo, "commit", "--allow-empty", "-m", f"[DREO-MERGE] {integration} <- {feature}")
+        git(self.repo, "push", "-u", "origin", integration)
+
+        git(self.repo, "checkout", feature)
+        (self.repo / "push.txt").write_text("v2\n", encoding="utf-8")
+        git(self.repo, "commit", "-am", "feature v2")
+        git(self.repo, "push", "origin", feature)
+
+        git(self.repo, "checkout", "master")
+        result = subprocess.run(
+            [sys.executable, str(OPERATE), "2", "2", integration, "--push"],
+            cwd=self.repo,
+            text=True,
+            capture_output=True,
+        )
+
+        self.assertEqual(result.returncode, 0, msg=result.stdout + "\n" + result.stderr)
+        self.assertIn("已推送到远端", result.stdout)
+        self.assertIn("执行结果: 成功", result.stdout)
+        self.assertTrue(result.stdout.strip().endswith("DREO_RESULT=SUCCESS"))
+
     def test_operate_create_feature_fails_fast_when_local_branch_exists(self) -> None:
         branch = f"feature_test1_{date.today().strftime('%Y%m%d')}"
         git(self.repo, "checkout", "-b", branch)

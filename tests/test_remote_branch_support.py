@@ -104,6 +104,13 @@ class RemoteBranchSupportTest(unittest.TestCase):
     def local_branches(self) -> set[str]:
         return set(git(self.repo, "branch", "--format=%(refname:short)").splitlines())
 
+    def clone_remote_repo(self, name: str) -> Path:
+        clone_dir = self.root / name
+        git(self.root, "clone", str(self.remote), str(clone_dir))
+        git(clone_dir, "config", "user.name", "Codex Test")
+        git(clone_dir, "config", "user.email", "codex-test@example.com")
+        return clone_dir
+
     def tracking_subjects(self, branch_name: str) -> list[str]:
         log = git(
             self.repo,
@@ -249,6 +256,46 @@ class RemoteBranchSupportTest(unittest.TestCase):
         self.assertIn("已同步 (1)", output)
         self.assertIn("最新提交: feature v2", output)
         self.assertEqual((self.repo / "sync.txt").read_text(encoding="utf-8"), "v2\n")
+
+    def test_update_integration_branch_syncs_remote_master_before_compare(self) -> None:
+        feature = f"feature_master_sync_{TEST_DATE}"
+        integration = f"dev_2.2.0_{TEST_DATE}"
+
+        git(self.repo, "checkout", "master")
+        git(self.repo, "checkout", "-b", feature)
+        (self.repo / "master-sync.txt").write_text("feature\n", encoding="utf-8")
+        git(self.repo, "add", "master-sync.txt")
+        git(self.repo, "commit", "-m", "feature v1")
+        git(self.repo, "push", "-u", "origin", feature)
+
+        git(self.repo, "checkout", "master")
+        git(self.repo, "checkout", "-b", integration)
+        git(self.repo, "merge", "--no-ff", feature, "-m", f"Merge branch '{feature}' into {integration}")
+        git(self.repo, "commit", "--allow-empty", "-m", f"{bm.MERGE_TAG} {integration} <- {feature}")
+        git(self.repo, "push", "-u", "origin", integration)
+        git(self.repo, "checkout", "master")
+
+        other = self.clone_remote_repo("master-updater")
+        git(other, "checkout", "master")
+        (other / "README.md").write_text("init\nremote master update\n", encoding="utf-8")
+        git(other, "commit", "-am", "master v2")
+        git(other, "push", "origin", "master")
+
+        _, output = run_flow(
+            self.repo,
+            bm.update_integration_branch,
+            ["1", "y", "n"],
+        )
+
+        self.assertIn("检测到 master 有 1 个新提交", output)
+        self.assertIn("已同步最新主干代码: master", output)
+        merge_ancestor = subprocess.run(
+            ["git", "merge-base", "--is-ancestor", "origin/master", integration],
+            cwd=self.repo,
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(merge_ancestor.returncode, 0, msg=output)
 
     def test_pull_remote_branch_to_local(self) -> None:
         branch = f"feature_pull_{TEST_DATE}"

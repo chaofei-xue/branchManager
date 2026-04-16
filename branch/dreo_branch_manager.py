@@ -416,6 +416,11 @@ def has_default_remote():
     return ok
 
 
+def has_origin_remote():
+    """兼容参数化脚本的旧调用名。"""
+    return has_default_remote()
+
+
 def offer_push_branch(branch, set_upstream=False, prompt=None):
     if not has_default_remote():
         note(f"未检测到 {get_default_remote()} 远端，已跳过推送。", 'tip')
@@ -1826,6 +1831,9 @@ def checkout_and_update_base(base):
 
 
 def sync_base_into_integration(int_branch, base):
+    if not checkout_and_update_base(base):
+        return 'failed'
+
     ok, _, err = run_git('checkout', int_branch)
     if not ensure_git_success(ok, err, f"切换到 [{int_branch}]"):
         return 'failed'
