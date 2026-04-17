@@ -183,6 +183,33 @@ class RemoteBranchSupportTest(unittest.TestCase):
         self.assertIn(feature, self.local_branches())
         self.assertIn(integration, self.local_branches())
 
+    def test_create_integration_branch_prefers_remote_feature_over_stale_local(self) -> None:
+        feature = f"feature_create_remote_{TEST_DATE}"
+        integration = f"dev_1.1.0_{TEST_DATE}"
+
+        git(self.repo, "checkout", "master")
+        git(self.repo, "checkout", "-b", feature)
+        (self.repo / "create-sync.txt").write_text("v1\n", encoding="utf-8")
+        git(self.repo, "add", "create-sync.txt")
+        git(self.repo, "commit", "-m", "feature v1")
+        git(self.repo, "push", "-u", "origin", feature)
+        git(self.repo, "checkout", "master")
+
+        other = self.clone_remote_repo("create-integration-updater")
+        git(other, "checkout", "-b", feature, "--track", f"origin/{feature}")
+        (other / "create-sync.txt").write_text("v2\n", encoding="utf-8")
+        git(other, "commit", "-am", "feature v2")
+        git(other, "push", "origin", feature)
+
+        _, output = run_flow(
+            self.repo,
+            bm.create_integration_branch,
+            ["1", "1.1.0", "1", "y", "n"],
+        )
+
+        self.assertEqual((self.repo / "create-sync.txt").read_text(encoding="utf-8"), "v2\n")
+        self.assertIn(f"已创建集成分支: {integration}", output)
+
     def test_update_integration_branch_restores_remote_only_branches(self) -> None:
         feature = f"feature_sync_{TEST_DATE}"
         integration = f"dev_2.0.0_{TEST_DATE}"
@@ -257,6 +284,47 @@ class RemoteBranchSupportTest(unittest.TestCase):
         self.assertIn("最新提交: feature v2", output)
         self.assertEqual((self.repo / "sync.txt").read_text(encoding="utf-8"), "v2\n")
 
+    def test_update_integration_branch_syncs_remote_integration_before_merging(self) -> None:
+        feature = f"feature_update_target_{TEST_DATE}"
+        integration = f"dev_2.1.1_{TEST_DATE}"
+
+        git(self.repo, "checkout", "master")
+        git(self.repo, "checkout", "-b", feature)
+        (self.repo / "update-target.txt").write_text("feature v1\n", encoding="utf-8")
+        git(self.repo, "add", "update-target.txt")
+        git(self.repo, "commit", "-m", "feature v1")
+        git(self.repo, "push", "-u", "origin", feature)
+
+        git(self.repo, "checkout", "master")
+        git(self.repo, "checkout", "-b", integration)
+        git(self.repo, "merge", "--no-ff", feature, "-m", f"Merge branch '{feature}' into {integration}")
+        git(self.repo, "commit", "--allow-empty", "-m", f"{bm.MERGE_TAG} {integration} <- {feature}")
+        git(self.repo, "push", "-u", "origin", integration)
+        git(self.repo, "checkout", "master")
+
+        other = self.clone_remote_repo("integration-updater")
+        git(other, "checkout", "-b", integration, "--track", f"origin/{integration}")
+        (other / "remote-integration.txt").write_text("remote integration update\n", encoding="utf-8")
+        git(other, "add", "remote-integration.txt")
+        git(other, "commit", "-m", "integration remote update")
+        git(other, "push", "origin", integration)
+
+        git(self.repo, "checkout", feature)
+        (self.repo / "update-target.txt").write_text("feature v2\n", encoding="utf-8")
+        git(self.repo, "commit", "-am", "feature v2")
+        git(self.repo, "push", "origin", feature)
+        git(self.repo, "checkout", "master")
+
+        _, output = run_flow(
+            self.repo,
+            bm.update_integration_branch,
+            ["1", "y", "n"],
+        )
+
+        self.assertEqual((self.repo / "remote-integration.txt").read_text(encoding="utf-8"), "remote integration update\n")
+        self.assertEqual((self.repo / "update-target.txt").read_text(encoding="utf-8"), "feature v2\n")
+        self.assertIn(f"本地分支已同步到远端最新: {integration}", output)
+
     def test_update_integration_branch_syncs_remote_master_before_compare(self) -> None:
         feature = f"feature_master_sync_{TEST_DATE}"
         integration = f"dev_2.2.0_{TEST_DATE}"
@@ -323,6 +391,45 @@ class RemoteBranchSupportTest(unittest.TestCase):
         remote_refs = git(self.repo, "branch", "-r", "--format=%(refname:short)")
         self.assertNotIn(f"origin/{branch}", remote_refs.splitlines())
         self.assertIn("远端已删除", output)
+
+    def test_add_branches_to_integration_syncs_remote_target_and_prefers_remote_feature(self) -> None:
+        feature = f"feature_add_remote_{TEST_DATE}"
+        integration = f"dev_2.3.0_{TEST_DATE}"
+
+        git(self.repo, "checkout", "master")
+        git(self.repo, "checkout", "-b", integration)
+        git(self.repo, "push", "-u", "origin", integration)
+        git(self.repo, "checkout", "master")
+
+        other = self.clone_remote_repo("add-integration-updater")
+        git(other, "checkout", "-b", integration, "--track", f"origin/{integration}")
+        (other / "integration-target.txt").write_text("target remote update\n", encoding="utf-8")
+        git(other, "add", "integration-target.txt")
+        git(other, "commit", "-m", "integration target update")
+        git(other, "push", "origin", integration)
+
+        git(self.repo, "checkout", "-b", feature)
+        (self.repo / "add-sync.txt").write_text("v1\n", encoding="utf-8")
+        git(self.repo, "add", "add-sync.txt")
+        git(self.repo, "commit", "-m", "feature v1")
+        git(self.repo, "push", "-u", "origin", feature)
+        git(self.repo, "checkout", "master")
+
+        other_feature = self.clone_remote_repo("add-feature-updater")
+        git(other_feature, "checkout", "-b", feature, "--track", f"origin/{feature}")
+        (other_feature / "add-sync.txt").write_text("v2\n", encoding="utf-8")
+        git(other_feature, "commit", "-am", "feature v2")
+        git(other_feature, "push", "origin", feature)
+
+        _, output = run_flow(
+            self.repo,
+            bm.add_branches_to_integration,
+            ["1", "1", "y", "n"],
+        )
+
+        self.assertEqual((self.repo / "integration-target.txt").read_text(encoding="utf-8"), "target remote update\n")
+        self.assertEqual((self.repo / "add-sync.txt").read_text(encoding="utf-8"), "v2\n")
+        self.assertIn(f"本地分支已同步到远端最新: {integration}", output)
 
     def test_show_status_includes_local_and_remote_counts(self) -> None:
         local_feature = f"feature_local_{TEST_DATE}"
@@ -466,6 +573,189 @@ class RemoteBranchSupportTest(unittest.TestCase):
 
         self.assertEqual(merge_result.returncode, 0)
         self.assertIn("合并主干代码成功: master", output)
+
+    def test_prompt_merge_master_for_behind_feature_branch_can_merge_immediately(self) -> None:
+        feature = f"feature_startup_prompt_{TEST_DATE}"
+
+        git(self.repo, "checkout", "-b", feature)
+        (self.repo / "startup-feature.txt").write_text("feature work\n", encoding="utf-8")
+        git(self.repo, "add", "startup-feature.txt")
+        git(self.repo, "commit", "-m", "feature work")
+
+        git(self.repo, "checkout", "master")
+        (self.repo / "startup-master.txt").write_text("master update\n", encoding="utf-8")
+        git(self.repo, "add", "startup-master.txt")
+        git(self.repo, "commit", "-m", "master update")
+        git(self.repo, "push", "origin", "master")
+        git(self.repo, "checkout", feature)
+
+        _, output = run_flow(
+            self.repo,
+            bm.prompt_merge_master_for_behind_feature_branch,
+            ["y", "n"],
+        )
+
+        self.assertTrue((self.repo / "startup-master.txt").exists())
+        self.assertIn(f"检测到当前开发分支 [{feature}] 落后 [master] 1 个提交", output)
+        self.assertIn("合并主干代码成功: master", output)
+
+    def test_prompt_merge_master_for_behind_feature_branch_skips_non_feature_branch(self) -> None:
+        integration = f"dev_prompt_{TEST_DATE}"
+
+        git(self.repo, "checkout", "-b", integration)
+        (self.repo / "integration-startup.txt").write_text("integration work\n", encoding="utf-8")
+        git(self.repo, "add", "integration-startup.txt")
+        git(self.repo, "commit", "-m", "integration work")
+
+        git(self.repo, "checkout", "master")
+        (self.repo / "integration-master.txt").write_text("master update\n", encoding="utf-8")
+        git(self.repo, "add", "integration-master.txt")
+        git(self.repo, "commit", "-m", "master update")
+        git(self.repo, "push", "origin", "master")
+        git(self.repo, "checkout", integration)
+
+        result, output = run_flow(
+            self.repo,
+            bm.prompt_merge_master_for_behind_feature_branch,
+            [],
+        )
+
+        self.assertFalse(result)
+        self.assertFalse((self.repo / "integration-master.txt").exists())
+        self.assertNotIn("检测到当前开发分支", output)
+
+    def test_merge_master_to_current_syncs_remote_current_branch(self) -> None:
+        feature = f"feature_merge_remote_{TEST_DATE}"
+
+        git(self.repo, "checkout", "-b", feature)
+        (self.repo / "feature-remote.txt").write_text("v1\n", encoding="utf-8")
+        git(self.repo, "add", "feature-remote.txt")
+        git(self.repo, "commit", "-m", "feature v1")
+        git(self.repo, "push", "-u", "origin", feature)
+
+        other = self.clone_remote_repo("merge-current-updater")
+        git(other, "checkout", "-b", feature, "--track", f"origin/{feature}")
+        (other / "feature-remote.txt").write_text("v2\n", encoding="utf-8")
+        git(other, "commit", "-am", "feature v2")
+        git(other, "push", "origin", feature)
+
+        git(self.repo, "checkout", "master")
+        (self.repo / "master-current.txt").write_text("master update\n", encoding="utf-8")
+        git(self.repo, "add", "master-current.txt")
+        git(self.repo, "commit", "-m", "master update")
+        git(self.repo, "push", "origin", "master")
+        git(self.repo, "checkout", feature)
+
+        _, output = run_flow(
+            self.repo,
+            bm.merge_master_to_current,
+            ["y", "n"],
+        )
+
+        self.assertEqual((self.repo / "feature-remote.txt").read_text(encoding="utf-8"), "v2\n")
+        self.assertTrue((self.repo / "master-current.txt").exists())
+        merge_result = subprocess.run(
+            ["git", "merge-base", "--is-ancestor", f"origin/{feature}", feature],
+            cwd=self.repo,
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(merge_result.returncode, 0, msg=output)
+        self.assertIn(f"本地分支已同步到远端最新: {feature}", output)
+
+    def test_merge_master_to_current_stops_when_base_cannot_fast_forward(self) -> None:
+        feature = f"feature_merge_blocked_{TEST_DATE}"
+
+        git(self.repo, "checkout", "-b", feature)
+        (self.repo / "feature-blocked.txt").write_text("feature work\n", encoding="utf-8")
+        git(self.repo, "add", "feature-blocked.txt")
+        git(self.repo, "commit", "-m", "feature work")
+
+        other = self.clone_remote_repo("master-diverged-updater")
+        git(other, "checkout", "master")
+        (other / "README.md").write_text("init\nremote master update\n", encoding="utf-8")
+        git(other, "commit", "-am", "master remote update")
+        git(other, "push", "origin", "master")
+
+        git(self.repo, "checkout", "master")
+        (self.repo / "local-master.txt").write_text("local master only\n", encoding="utf-8")
+        git(self.repo, "add", "local-master.txt")
+        git(self.repo, "commit", "-m", "master local update")
+        git(self.repo, "checkout", feature)
+
+        before_feature_head = git(self.repo, "rev-parse", feature)
+        result, output = run_flow(
+            self.repo,
+            bm.merge_master_to_current,
+            ["y"],
+        )
+        after_feature_head = git(self.repo, "rev-parse", feature)
+
+        self.assertFalse(result)
+        self.assertEqual(before_feature_head, after_feature_head)
+        self.assertIn("同步 [master] 到远端最新失败", output)
+        self.assertNotIn("合并主干代码成功: master", output)
+
+    def test_merge_release_to_master_uses_remote_latest_and_updates_local_release(self) -> None:
+        release = f"release_1.0.1_{TEST_DATE}"
+
+        git(self.repo, "checkout", "master")
+        git(self.repo, "checkout", "-b", release)
+        (self.repo / "release.txt").write_text("v1\n", encoding="utf-8")
+        git(self.repo, "add", "release.txt")
+        git(self.repo, "commit", "-m", "release v1")
+        git(self.repo, "push", "-u", "origin", release)
+        git(self.repo, "checkout", "master")
+
+        other = self.clone_remote_repo("release-updater")
+        git(other, "checkout", "-b", release, "--track", f"origin/{release}")
+        (other / "release.txt").write_text("v2\n", encoding="utf-8")
+        git(other, "commit", "-am", "release v2")
+        git(other, "push", "origin", release)
+
+        _, output = run_flow(
+            self.repo,
+            bm.merge_to_master,
+            ["1", "y", "n"],
+        )
+
+        self.assertEqual((self.repo / "release.txt").read_text(encoding="utf-8"), "v2\n")
+        self.assertEqual(git(self.repo, "show", f"{release}:release.txt"), "v2")
+        self.assertEqual(
+            git(self.repo, "rev-parse", release),
+            git(self.repo, "rev-parse", f"origin/{release}"),
+        )
+        self.assertIn(f"本地分支已同步到远端最新: {release}", output)
+
+    def test_merge_release_to_master_skips_when_release_is_already_merged(self) -> None:
+        release = f"release_1.0.2_{TEST_DATE}"
+
+        git(self.repo, "checkout", "master")
+        git(self.repo, "checkout", "-b", release)
+        (self.repo / "release-skip.txt").write_text("done\n", encoding="utf-8")
+        git(self.repo, "add", "release-skip.txt")
+        git(self.repo, "commit", "-m", "release ready")
+        git(self.repo, "push", "-u", "origin", release)
+        git(self.repo, "checkout", "master")
+
+        _, first_output = run_flow(
+            self.repo,
+            bm.merge_to_master,
+            ["1", "y", "n"],
+        )
+        first_head = git(self.repo, "rev-parse", "HEAD")
+
+        _, second_output = run_flow(
+            self.repo,
+            bm.merge_to_master,
+            ["1", "y"],
+        )
+        second_head = git(self.repo, "rev-parse", "HEAD")
+
+        self.assertIn(f"[{release}] 已成功合并到 master！", first_output)
+        self.assertEqual(first_head, second_head)
+        self.assertIn(f"[{release}] 已合并到 master，已跳过此次操作。", second_output)
+        self.assertNotIn(f"[{release}] 已成功合并到 master！", second_output)
 
     def test_merge_release_to_master_can_delete_related_feature_branches(self) -> None:
         feature = f"feature_release_cleanup_{TEST_DATE}"

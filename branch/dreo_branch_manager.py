@@ -40,7 +40,7 @@ def today_str():
     return date.today().strftime('%Y%m%d')
 
 
-APP_VERSION = "1.0.2"
+APP_VERSION = "1.0.3"
 INSTALL_METADATA_FILE = "dreo_branch_manager_meta.json"
 
 
@@ -567,6 +567,41 @@ def branch_source_ref(branch):
     """同步/合并时优先使用远端分支，避免本地分支落后导致漏合并。"""
     remote = get_default_remote()
     return f"{remote}/{branch}" if has_remote_branch(branch) else branch
+
+
+def sync_local_branch_with_remote(branch):
+    """确保本地分支已可用，并在远端存在时尽量同步到远端最新。"""
+    if not ensure_local_branch(branch):
+        return False
+
+    if not has_remote_branch(branch):
+        return True
+
+    current = get_current_branch()
+    restore_branch = current != branch
+    if restore_branch:
+        ok, _, err = run_git('checkout', branch)
+        if not ensure_git_success(ok, err, f"切换到 [{branch}]"):
+            return False
+
+    remote = get_default_remote()
+    with LoadingIndicator(f"正在同步 [{branch}] 到远端最新提交"):
+        ok, out, err = run_git('pull', '--ff-only', remote, branch)
+
+    success = True
+    if ok:
+        note(f"本地分支已同步到远端最新: {branch}", 'success')
+    else:
+        note(f"同步本地分支 [{branch}] 到远端最新失败: {err or out}", 'error')
+        note(f"请先处理本地 [{branch}] 与 {remote}/{branch} 的分叉后再重试。", 'tip')
+        success = False
+
+    if restore_branch:
+        ok, _, err = run_git('checkout', current)
+        if not ensure_git_success(ok, err, f"切回 [{current}]"):
+            return False
+
+    return success
 
 
 def latest_commit_subject(ref):
@@ -1788,15 +1823,23 @@ def _merge_into_integration(int_branch, candidates, action_name="合并"):
         note("已取消。", 'warn')
         return False
 
+    if not sync_local_branch_with_remote(int_branch):
+        return False
+
     if not ensure_local_branch(int_branch, checkout=True):
         return False
 
     succeeded, failed = [], []
     for branch in selected:
-        if not ensure_local_branch(branch):
+        source_ref = branch_source_ref(branch)
+        if has_remote_branch(branch) and not has_local_branch(branch):
+            if not ensure_local_branch(branch):
+                failed.append(branch)
+                continue
+        elif source_ref == branch and not ensure_local_branch(branch):
             failed.append(branch)
             continue
-        if do_merge(branch):
+        if do_merge(source_ref, display_branch=branch):
             succeeded.append(branch)
         else:
             failed.append(branch)
@@ -1822,16 +1865,23 @@ def checkout_and_update_base(base):
     print(f"\n  {icon_slot(UI['checkout'], '36')} 切换到 {base}，同步最新代码...")
     if not ensure_local_branch(base, checkout=True):
         return False
+    if not has_remote_branch(base):
+        return True
     remote = get_default_remote()
     with LoadingIndicator(f"正在同步 {base} 最新代码"):
-        ok, _, _ = run_git('pull', remote, base)
+        ok, out, err = run_git('pull', '--ff-only', remote, base)
     if not ok:
-        note(f"拉取远端失败，使用本地 {base} 继续。", 'warn')
+        note(f"同步 [{base}] 到远端最新失败: {err or out}", 'error')
+        note(f"请先处理本地 [{base}] 与 {remote}/{base} 的分叉后再重试。", 'tip')
+        return False
     return True
 
 
 def sync_base_into_integration(int_branch, base):
     if not checkout_and_update_base(base):
+        return 'failed'
+
+    if not sync_local_branch_with_remote(int_branch):
         return 'failed'
 
     ok, _, err = run_git('checkout', int_branch)
@@ -2257,22 +2307,19 @@ def merge_to_master():
         note("已取消。", 'warn')
         return False
 
-    # 切换到 master
-    ok, _, err = run_git('checkout', base)
-    if not ok:
-        note(f"切换到 {base} 失败: {err}", 'error')
+    if not checkout_and_update_base(base):
+        return False
+
+    if not sync_local_branch_with_remote(release_branch):
         return
 
-    remote = get_default_remote()
-    with LoadingIndicator(f"正在同步 {base} 最新代码"):
-        ok, _, _ = run_git('pull', remote, base)
-    if not ok:
-        note(f"拉取远端失败，使用本地 {base} 继续。", 'warn')
+    release_ref = branch_source_ref(release_branch)
+    already_merged, _, _ = run_git('merge-base', '--is-ancestor', release_ref, base)
+    if already_merged:
+        note(f"[{release_branch}] 已合并到 {base}，已跳过此次操作。", 'tip')
+        return True
 
-    if not ensure_local_branch(release_branch):
-        return
-
-    if do_merge(release_branch):
+    if do_merge(release_ref, display_branch=release_branch):
         _, log, _ = run_git('log', '--oneline', '-5')
         note(f"[{release_branch}] 已成功合并到 {base}！", 'success')
         print(f"\n  {icon_slot(UI['records'], '36')} 最近提交记录：")
@@ -2300,7 +2347,7 @@ def merge_to_master():
 
 # ─── 功能 6：合并 master 到当前分支 ──────────────────────────────
 
-def merge_master_to_current():
+def merge_master_to_current(skip_confirm=False):
     header("合并 master 到当前分支", icon=UI['sync'])
     refresh_remote_refs()
 
@@ -2315,8 +2362,11 @@ def merge_master_to_current():
         return False
 
     print(f"\n  {icon_slot(UI['merge'], '36')} 操作：[{base}] → [{current}]")
-    if not confirm("确认执行？"):
+    if not skip_confirm and not confirm("确认执行？"):
         note("已取消。", 'warn')
+        return False
+
+    if not sync_local_branch_with_remote(current):
         return False
 
     if not checkout_and_update_base(base):
@@ -2341,6 +2391,32 @@ def merge_master_to_current():
         return True
 
     note("合并失败或已放弃。", 'error')
+    return False
+
+
+def prompt_merge_master_for_behind_feature_branch():
+    current = get_current_branch()
+    if not is_managed_feature_branch(current):
+        return False
+
+    refresh_remote_refs()
+    base = get_master_branch()
+    if not base or current == base:
+        return False
+
+    base_ref = branch_source_ref(base)
+    _, ahead, _ = run_git('rev-list', '--count', f'{current}..{base_ref}')
+    new_commits = int(ahead) if ahead.isdigit() else 0
+    if new_commits == 0:
+        return False
+
+    latest_subject = latest_commit_subject(base_ref)
+    latest_info = f"；最新提交: {latest_subject}" if latest_subject else ""
+    note(f"检测到当前开发分支 [{current}] 落后 [{base}] {new_commits} 个提交{latest_info}。", 'warn')
+    if confirm(f"是否现在执行“合并 {base} 到当前分支”？"):
+        return merge_master_to_current(skip_confirm=True)
+
+    note("已跳过主干同步提示。", 'tip')
     return False
 
 
@@ -2447,6 +2523,7 @@ def main():
 
     check_git_repo()
     check_rerere()
+    prompt_merge_master_for_behind_feature_branch()
 
     main_items = [
         ("创建开发分支（feature / bugfix）", create_feature_branch),
