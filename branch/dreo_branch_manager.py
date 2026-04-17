@@ -40,7 +40,7 @@ def today_str():
     return date.today().strftime('%Y%m%d')
 
 
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.0.2"
 INSTALL_METADATA_FILE = "dreo_branch_manager_meta.json"
 
 
