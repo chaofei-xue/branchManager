@@ -199,11 +199,11 @@ def update_and_abort_conflict() -> None:
     global FIRST_SYNC_SUCCESS_BRANCH, FIRST_SYNC_FAILED_BRANCH
     previous_subjects = tracking_subjects(DEV_350)
     _, output = run_flow(bm.update_integration_branch, [integration_choice(DEV_350), "y", "2"])
-    assert_true("已同步最新主干代码: master" in output, "更新集成分支时未先同步 master")
     success_branch = next((branch for branch in (FEATURE_1, FEATURE_2) if f"已同步 (1): {branch}" in output), None)
     failed_branch = next((branch for branch in (FEATURE_1, FEATURE_2) if f"失败   (1): {branch}" in output), None)
     assert_true(success_branch is not None, "未正确报告本次成功同步的开发分支")
     assert_true(failed_branch is not None, "未正确报告本次放弃合并的开发分支")
+    assert_true("已跳过主干同步: master" in output, "开发分支同步失败时不应继续同步 master")
     FIRST_SYNC_SUCCESS_BRANCH = success_branch
     FIRST_SYNC_FAILED_BRANCH = failed_branch
     assert_true(
@@ -211,11 +211,7 @@ def update_and_abort_conflict() -> None:
         "更新已有集成分支时不应新增追踪提交",
     )
     git("checkout", DEV_350)
-    assert_true((TEST_REPO / BASELINE_FILE).exists(), "集成分支未同步 master 的新增文件")
-    assert_true(
-        (TEST_REPO / BASELINE_FILE).read_text(encoding="utf-8") == BASELINE_TEXT,
-        "集成分支中的 master 基线文件内容不正确",
-    )
+    assert_true(not (TEST_REPO / BASELINE_FILE).exists(), "开发分支未完整同步时不应提前同步 master")
 
 
 def resolve_current_conflict(_prompt: str) -> None:
@@ -229,6 +225,7 @@ def update_and_resolve_conflict() -> None:
     assert_true("冲突已解决，合并完成" in output, "手动解决冲突路径未完成")
     assert_true(FIRST_SYNC_SUCCESS_BRANCH is not None and FIRST_SYNC_FAILED_BRANCH is not None, "首次同步结果未记录")
     assert_true(f"无变更 (1): {FIRST_SYNC_SUCCESS_BRANCH}" in output, "首次已同步分支本应在第二次更新时被跳过")
+    assert_true("已同步最新主干代码: master" in output, "开发分支全部处理完成后应同步 master")
     assert_true(
         tracking_subjects(DEV_350) == previous_subjects,
         "手动解决更新冲突后不应新增追踪提交",
@@ -238,6 +235,11 @@ def update_and_resolve_conflict() -> None:
         (TEST_REPO / "README.md").read_text(encoding="utf-8")
         == "feature test1 修改\nfeature test2 冲突修改\n",
         "解决冲突后的 README 内容不正确",
+    )
+    assert_true((TEST_REPO / BASELINE_FILE).exists(), "集成分支未同步 master 的新增文件")
+    assert_true(
+        (TEST_REPO / BASELINE_FILE).read_text(encoding="utf-8") == BASELINE_TEXT,
+        "集成分支中的 master 基线文件内容不正确",
     )
 
 
@@ -268,7 +270,7 @@ def advance_master_with_readme_conflict() -> None:
 def update_and_abort_master_conflict() -> None:
     previous_subjects = tracking_subjects(DEV_350)
     _, output = run_flow(bm.update_integration_branch, [integration_choice(DEV_350), "y", "2"])
-    assert_true("主干同步失败，已停止后续开发分支同步" in output, "主干冲突后未停止后续开发分支同步")
+    assert_true(f"主干同步失败: master -> {DEV_350}" in output, "主干冲突后未正确报告同步失败")
     assert_true("已放弃同步主干代码: master" in output, "主干冲突放弃路径未生效")
     assert_true(tracking_subjects(DEV_350) == previous_subjects, "仅主干同步失败时不应新增开发分支追踪提交")
     assert_true(git("diff", "--name-only", "--diff-filter=U") == "", "放弃主干同步冲突后仍存在未解决冲突文件")

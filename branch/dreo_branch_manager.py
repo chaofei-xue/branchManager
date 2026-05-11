@@ -40,7 +40,7 @@ def today_str():
     return date.today().strftime('%Y%m%d')
 
 
-APP_VERSION = "1.0.3"
+APP_VERSION = "1.0.4"
 INSTALL_METADATA_FILE = "dreo_branch_manager_meta.json"
 
 
@@ -1877,11 +1877,11 @@ def checkout_and_update_base(base):
     return True
 
 
-def sync_base_into_integration(int_branch, base):
+def sync_base_into_integration(int_branch, base, sync_integration=True):
     if not checkout_and_update_base(base):
         return 'failed'
 
-    if not sync_local_branch_with_remote(int_branch):
+    if sync_integration and not sync_local_branch_with_remote(int_branch):
         return 'failed'
 
     ok, _, err = run_git('checkout', int_branch)
@@ -1894,7 +1894,7 @@ def sync_base_into_integration(int_branch, base):
         note(f"[{int_branch}] 已包含最新 {base}，无需同步主干代码。", 'tip')
         return 'skipped'
 
-    print(f"\n  {icon_slot(UI['sync'], '36')} 检测到 {base} 有 {new_commits} 个新提交，先同步到 [{int_branch}] ...")
+    print(f"\n  {icon_slot(UI['sync'], '36')} 检测到 {base} 有 {new_commits} 个新提交，同步到 [{int_branch}] ...")
     if do_merge(base, action_label="同步主干代码"):
         return 'success'
     return 'failed'
@@ -2035,7 +2035,7 @@ def get_merged_feature_branches(int_branch):
 
 
 def update_integration_branch():
-    header("同步更新集成分支（先同步主干，再合并开发分支新增提交）", icon=UI['sync'])
+    header("同步更新集成分支（先合并开发分支，再同步主干）", icon=UI['sync'])
     refresh_remote_refs()
 
     int_branches = get_integration_branches()
@@ -2088,7 +2088,7 @@ def update_integration_branch():
     if missing:
         note(f"{len(missing)} 个分支本地不存在，将跳过。", 'warn')
 
-    print(f"\n  {icon_slot(UI['sync'], '36')} 将对以上 {len(existing)} 个分支执行 re-merge，只引入新增提交。")
+    print(f"\n  {icon_slot(UI['sync'], '36')} 将先对以上 {len(existing)} 个分支执行 re-merge，只引入新增提交；完成后再同步主干。")
     if not confirm("确认同步？"):
         note("已取消。", 'warn')
         return False
@@ -2098,12 +2098,15 @@ def update_integration_branch():
         note("未找到 master / main 分支。", 'error')
         return
 
-    base_sync_status = sync_base_into_integration(int_branch, base)
-    if base_sync_status == 'failed':
+    if not sync_local_branch_with_remote(int_branch):
         summary_block("同步结果汇总", [
-            ('❌', f"主干同步失败，已停止后续开发分支同步: {base} -> {int_branch}"),
+            ('❌', f"集成分支同步失败，已停止后续操作: {int_branch}"),
             (UI['integration_branch'], f"当前所在集成分支: {get_current_branch()}"),
         ])
+        return False
+
+    ok, _, err = run_git('checkout', int_branch)
+    if not ensure_git_success(ok, err, f"切换到 [{int_branch}]"):
         return False
 
     succeeded, failed, skipped = [], [], []
@@ -2133,11 +2136,21 @@ def update_integration_branch():
         else:
             failed.append(branch)
 
+    base_sync_status = 'skipped_due_to_failed'
+    if failed:
+        note("存在开发分支同步失败，已跳过主干同步，避免在未完整合并开发分支时继续叠加变更。", 'warn')
+    else:
+        base_sync_status = sync_base_into_integration(int_branch, base, sync_integration=False)
+
     rows = []
     if base_sync_status == 'success':
         rows.append(('🔄', f"已同步最新主干代码: {base}"))
     elif base_sync_status == 'skipped':
         rows.append(('📌', f"主干已是最新: {base}"))
+    elif base_sync_status == 'failed':
+        rows.append(('❌', f"主干同步失败: {base} -> {int_branch}"))
+    elif base_sync_status == 'skipped_due_to_failed':
+        rows.append(('⏭️', f"已跳过主干同步: {base}"))
     if succeeded:
         rows.append(('✅', f"已同步 ({len(succeeded)}): " + ", ".join(succeeded)))
     if skipped:
@@ -2147,11 +2160,15 @@ def update_integration_branch():
     rows.append((UI['integration_branch'], f"当前所在集成分支: {get_current_branch()}"))
     summary_block("同步结果汇总", rows)
 
+    if base_sync_status in ('failed', 'skipped_due_to_failed'):
+        return False
+
     if base_sync_status == 'success' or succeeded:
         offer_push_branch(
             int_branch,
             prompt=f"是否将同步后的集成分支 [{int_branch}] 推送到远端？",
         )
+    return True
 
 
 # ─── 功能 4：删除分支 ────────────────────────────────────────────

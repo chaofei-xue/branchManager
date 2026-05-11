@@ -365,6 +365,51 @@ class RemoteBranchSupportTest(unittest.TestCase):
         )
         self.assertEqual(merge_ancestor.returncode, 0, msg=output)
 
+    def test_update_integration_branch_merges_features_before_master(self) -> None:
+        feature = f"feature_resolved_master_{TEST_DATE}"
+        integration = f"dev_2.2.1_{TEST_DATE}"
+
+        git(self.repo, "checkout", "master")
+        (self.repo / "conflict-order.txt").write_text("base\n", encoding="utf-8")
+        git(self.repo, "add", "conflict-order.txt")
+        git(self.repo, "commit", "-m", "add conflict order base")
+        git(self.repo, "push", "origin", "master")
+
+        git(self.repo, "checkout", "-b", feature)
+        (self.repo / "conflict-order.txt").write_text("feature v1\n", encoding="utf-8")
+        git(self.repo, "commit", "-am", "feature v1")
+        git(self.repo, "push", "-u", "origin", feature)
+
+        git(self.repo, "checkout", "master")
+        git(self.repo, "checkout", "-b", integration)
+        git(self.repo, "merge", "--no-ff", feature, "-m", f"Merge branch '{feature}' into {integration}")
+        git(self.repo, "commit", "--allow-empty", "-m", f"{bm.MERGE_TAG} {integration} <- {feature}")
+        git(self.repo, "push", "-u", "origin", integration)
+
+        git(self.repo, "checkout", "master")
+        (self.repo / "conflict-order.txt").write_text("master v2\n", encoding="utf-8")
+        git(self.repo, "commit", "-am", "master v2")
+        git(self.repo, "push", "origin", "master")
+
+        git(self.repo, "checkout", feature)
+        git(self.repo, "merge", "master", check=False)
+        (self.repo / "conflict-order.txt").write_text("resolved by feature\n", encoding="utf-8")
+        git(self.repo, "add", "conflict-order.txt")
+        git(self.repo, "commit", "-m", "merge master into feature with resolution")
+        git(self.repo, "push", "origin", feature)
+        git(self.repo, "checkout", integration)
+
+        result, output = run_flow(
+            self.repo,
+            bm.update_integration_branch,
+            ["1", "y", "n"],
+        )
+
+        self.assertTrue(result, msg=output)
+        self.assertIn("已同步 (1)", output)
+        self.assertIn("主干已是最新: master", output)
+        self.assertEqual((self.repo / "conflict-order.txt").read_text(encoding="utf-8"), "resolved by feature\n")
+
     def test_pull_remote_branch_to_local(self) -> None:
         branch = f"feature_pull_{TEST_DATE}"
         self.create_remote_feature(branch, "pull me")
