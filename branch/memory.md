@@ -131,6 +131,13 @@ DREO_RESULT=FAILED
 
 如果从当前分支创建，报告会尝试按真实来源分支描述，不再一律写成“从 master 拉出”。
 
+创建开发分支时，输入分支名后还会要求输入「版本描述」：
+
+- **不允许为空**，输入空会持续提示重新输入
+- 在新分支上写入一条空提交 `[DREO-DESC]<描述>`
+- 远端已有同名分支被恢复到本地时，不会再写入新的描述提交（沿用远端历史）
+- 参数模式 (`dreo_branch_operate 1 ...`) 通过 `--desc "<描述>"` 传入（必填）
+
 ### 4.2 集成分支
 
 集成分支命名规则：
@@ -143,6 +150,22 @@ DREO_RESULT=FAILED
 - 创建集成分支
 - 更新集成分支
 - 添加新的开发分支到集成分支
+
+创建 `release` 分支时，如果当前存在 `dev_*` 集成分支，会在版本号输入后多一个步骤让用户选择集成来源：
+
+1. **手动选择开发分支** — 走与 `dev` 相同的流程
+2. **从已有 dev 集成分支继承** — 用户选择一个 `dev` 分支，脚本通过 `get_merged_feature_branches(dev_branch)` 自动识别该 dev 分支的已集成开发分支列表，作为 `feature_branches` 候选列表传入后续流程
+
+如果没有任何 `dev_*` 分支存在，release 直接进入选择开发分支的流程，不弹选择来源。
+
+参数模式通过 `--from-dev <dev分支名>` 指定继承源；不提供 `--from-dev` 时与 dev 一样需要显式传入开发分支列表。
+
+创建集成分支时，会在合并完成后聚合所选开发分支的 `[DREO-DESC]` 描述：
+
+- 读取每个开发分支最近一条 `[DREO-DESC]` 描述（远端优先、本地兜底）
+- 原样拼接，逗号隔开，写入一条空提交：`[DREO-DESC]<desc1>,<desc2>,...`
+- 所选开发分支均无描述时跳过该提交，并给出提示
+- 仅在「创建集成分支」阶段写入；「更新集成分支」与「添加新的开发分支到集成分支」当前不会再次写入集成描述提交
 
 ### 4.3 更新集成分支的当前逻辑
 
@@ -276,6 +299,16 @@ DREO_RESULT=FAILED
 
 之所以这么做，是为了避免每次同步开发分支新增提交时都插入一条空追踪提交，导致历史非常难看。
 
+### 4.8.1 `[DREO-DESC]` 描述提交规则
+
+当前规则：
+
+- 创建开发分支时，用户可以输入「版本描述」(空则跳过)；非空写入一条空提交 `[DREO-DESC]<描述>` 到开发分支
+- 创建集成分支时，会读取所选开发分支最近一条 `[DREO-DESC]` 描述，原样拼接逗号隔开写入集成分支：`[DREO-DESC]<desc1>,<desc2>,...`
+- **更新集成分支与添加新开发分支到集成分支时，当前不会再写**集成层面的描述提交（避免历史被反复覆盖）
+- `get_branch_description(branch)` 用于读取分支最近一条 `[DREO-DESC]`，远端优先、本地兜底；用 `git log -F --grep=[DREO-DESC]` 匹配
+- 关键常量：`DESC_TAG = '[DREO-DESC]'`
+
 ### 4.9 冲突处理
 
 交互模式：
@@ -366,8 +399,8 @@ git config --local rerere.enabled true
 
 `dreo_branch_operate.py` 当前支持的菜单映射：
 
-- `1 <feature|bugfix> <name> [master|current]`
-- `2 1 <dev|release> <version> <branch...>`
+- `1 <feature|bugfix> <name> [master|current] --desc "<描述>"`
+- `2 1 <dev|release> <version> <branch...>` 或 `2 1 release <version> --from-dev <dev分支名>`
 - `2 2 <integration_branch>`
 - `2 3 <integration_branch> <branch...>`
 - `3 <remote_branch>`
@@ -383,6 +416,7 @@ git config --local rerere.enabled true
 - 冲突直接失败
 - `--push` 时会推送
 - 历史关联开发分支已删除时，更新集成分支仍返回成功，只给 warning
+- `--desc` 仅作用于菜单 `1` 创建开发分支且为必填；写入 `[DREO-DESC]<desc>` 描述提交
 
 ## 7. 安装与路径
 
@@ -413,7 +447,7 @@ git config --local rerere.enabled true
 
 当前已验证通过的全量测试数：
 
-- `Ran 56 tests`
+- `Ran 63 tests`
 
 常用测试命令：
 
@@ -450,6 +484,9 @@ python3 -m unittest discover -s tests -p 'test_*.py'
   - 已合并的 release 必须提示跳过
   - 不能重复报成功
 - 更新集成分支时不再写新的 `[DREO-MERGE]`
+- 创建开发分支时版本描述为必填，必须写入 `[DREO-DESC]<描述>` 空提交
+- 创建集成分支时，必须聚合所选开发分支的 `[DREO-DESC]`，原样逗号拼接写入集成层 `[DREO-DESC]` 提交（全空时可跳过并提示）
+- 「更新集成分支」与「添加新开发分支到集成分支」当前都不会写入集成层 `[DREO-DESC]`，避免反复覆盖历史
 - 参数模式最后两行输出必须稳定
 - 报告模板代码与主逻辑已经分离，不建议再把大段 HTML 塞回主脚本
 

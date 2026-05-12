@@ -83,6 +83,7 @@ branch
 
 - 支持 `feature` / `bugfix`
 - 支持基于 `master` 或当前分支创建
+- 输入分支名后会要求输入「版本描述」(不可为空)；会写入一条 `[DREO-DESC]<描述>` 空提交，用于后续感知该分支的用途
 - 成功后可选择是否推送远端
 
 #### 2. 创建集成分支
@@ -92,6 +93,10 @@ branch
 - 支持 `dev` / `release`
 - 会先同步最新 `master`
 - 可直接把多个开发分支集成进去
+- 创建 `release` 分支时，如果存在 `dev` 集成分支，会让用户选择：
+  - **手动选择开发分支** — 和 `dev` 流程一样
+  - **从已有 dev 集成分支继承** — 自动识别该 `dev` 分支的开发分支列表，直接用于 release 集成
+- 集成完成后会读取每个开发分支最近的 `[DREO-DESC]` 描述，原样拼接并用逗号隔开，写入一条 `[DREO-DESC]<描述1>,<描述2>,...` 空提交；所选分支均无描述时跳过该提交
 
 #### 3. 更新集成分支
 
@@ -134,10 +139,28 @@ dreo_branch_operate --help
 dreo_branch_operate 1 feature test1 master
 ```
 
-创建集成分支：
+带版本描述创建开发分支（`--desc` 必填，会写入 `[DREO-DESC]登录开发` 空提交）：
+
+```bash
+dreo_branch_operate 1 feature login master --desc 登录开发
+```
+
+创建 dev 集成分支：
 
 ```bash
 dreo_branch_operate 2 1 dev 3.6.0 feature_a_20260415 feature_b_20260415
+```
+
+从已有 dev 分支继承创建 release 分支：
+
+```bash
+dreo_branch_operate 2 1 release 3.6.0 --from-dev dev_3.6.0_20260415
+```
+
+手动指定开发分支创建 release 分支：
+
+```bash
+dreo_branch_operate 2 1 release 3.6.0 feature_a_20260415 feature_b_20260415
 ```
 
 更新集成分支：

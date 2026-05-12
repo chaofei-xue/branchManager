@@ -100,6 +100,7 @@ MANAGED_BRANCH_PATTERNS = {
 }
 
 MERGE_TAG = '[DREO-MERGE]'
+DESC_TAG = '[DREO-DESC]'
 
 _ANSI_RE = re.compile(r'\033\[[0-9;]*m')
 
@@ -1643,6 +1644,70 @@ def write_tracking_commit(int_branch, branches):
     return True
 
 
+def write_description_commit(description, branch_label=None):
+    """写一条空提交记录当前分支的描述，格式：[DREO-DESC]<description>。
+    description 为空时不写。
+    """
+    description = (description or '').strip()
+    if not description:
+        return False
+    msg = f"{DESC_TAG}{description}"
+    ok, _, err = run_git('commit', '--allow-empty', '-m', msg)
+    if not ok:
+        target = branch_label or get_current_branch()
+        note(f"分支描述提交写入失败 ({target}): {err}", 'warn')
+        note("后续将无法读取该分支的 [DREO-DESC] 描述，请检查 git 用户信息或 hook 配置。", 'tip')
+        return False
+    return True
+
+
+def get_branch_description(branch):
+    """读取目标分支上最近一条 [DREO-DESC] 描述。
+    优先读取远端引用，远端不存在再读取本地，未找到时返回空字符串。
+    """
+    if not branch:
+        return ''
+    if has_remote_branch(branch) or has_local_branch(branch):
+        ref = branch_source_ref(branch)
+    else:
+        ref = branch
+    ok, log, _ = run_git(
+        'log', ref, '-F', f'--grep={DESC_TAG}', '--pretty=format:%s',
+        capture=True,
+    )
+    if not ok:
+        return ''
+    for line in log.splitlines():
+        line = line.strip()
+        if line.startswith(DESC_TAG):
+            return line[len(DESC_TAG):].strip()
+    return ''
+
+
+def write_integration_description_commit(int_branch, branches):
+    """汇总开发分支的 [DREO-DESC] 描述，原样拼接并用逗号隔开，写入集成分支。
+    格式：[DREO-DESC]<desc_a>,<desc_b>,...
+    所有描述均为空时不写提交。
+    """
+    if not branches:
+        return False
+    descs = []
+    for branch in branches:
+        desc = get_branch_description(branch)
+        if desc:
+            descs.append(desc)
+    if not descs:
+        note("所选开发分支均无 [DREO-DESC] 描述，已跳过集成分支描述提交。", 'tip')
+        return False
+    msg = f"{DESC_TAG}{','.join(descs)}"
+    ok, _, err = run_git('commit', '--allow-empty', '-m', msg)
+    if not ok:
+        note(f"集成分支描述提交写入失败: {err}", 'warn')
+        return False
+    note(f"已写入集成分支描述提交: {int_branch}", 'success')
+    return True
+
+
 def handle_conflict(merging_branch, action_label="合并"):
     """引导用户解决合并冲突，返回是否最终成功"""
     header("合并冲突处理", icon=UI['conflict'])
@@ -1775,10 +1840,20 @@ def create_feature_branch():
             continue
         break
 
+    while True:
+        description = read_text_input(
+            "版本描述（用于标记此分支用途，如：登录开发）",
+            prefix='> ',
+        )
+        if description:
+            break
+        note("版本描述不能为空，请输入。", 'warn')
+
     if has_remote_branch(branch_name):
         note(f"检测到同名远端分支 [{branch_name}]，将直接拉取到本地。", 'tip')
         if not ensure_local_branch(branch_name, checkout=True):
             return
+        note("远端已有同名分支，将沿用其历史，已跳过新写入版本描述提交。", 'tip')
         return
 
     # 切换到 base 并更新
@@ -1795,6 +1870,8 @@ def create_feature_branch():
     ok, _, err = run_git('checkout', '-b', branch_name)
     if ok:
         note(f"已创建并切换到: {branch_name}  (基于 {base})", 'success')
+        if write_description_commit(description, branch_label=branch_name):
+            note(f"已记录版本描述: {description}", 'success')
         offer_push_branch(
             branch_name,
             set_upstream=True,
@@ -1940,6 +2017,42 @@ def create_integration_branch():
             continue
         break
 
+    # release 分支新增：选择集成来源方式
+    if env_prefix == 'release':
+        dev_branches = [b for b in get_integration_branches() if b.startswith('dev_')]
+        if dev_branches:
+            print(f"\n  {icon_slot(UI['select'], '36')} 请选择 release 集成来源：")
+            source_idx = select_one([
+                '手动选择开发分支',
+                '从已有 dev 集成分支继承',
+            ], "集成来源")
+            if source_idx is None:
+                return False
+            if source_idx == 1:
+                print(f"\n  {icon_slot(UI['select'], '36')} 请选择要继承的 dev 集成分支：")
+                dev_idx = select_one(
+                    [branch_display_name(b) for b in dev_branches],
+                    "dev 集成分支",
+                )
+                if dev_idx is None:
+                    return False
+                source_dev = dev_branches[dev_idx]
+                inherited = get_merged_feature_branches(source_dev)
+                if not inherited:
+                    note(f"[{source_dev}] 没有找到任何已集成的开发分支记录。", 'error')
+                    return
+                local_set = set(get_local_branches())
+                remote_set = set(get_remote_branches())
+                available = [b for b in inherited if b in local_set or b in remote_set]
+                missing = [b for b in inherited if b not in local_set and b not in remote_set]
+                if missing:
+                    note(f"以下分支本地与远端均不存在，将跳过: {', '.join(missing)}", 'warn')
+                if not available:
+                    note("所有继承的开发分支都已不存在，无法继续。", 'error')
+                    return
+                note(f"从 [{source_dev}] 继承 {len(available)} 个开发分支: {', '.join(available)}", 'success')
+                feature_branches = available
+
     if has_local_branch(int_branch):
         note(f"分支 '{int_branch}' 已存在，请使用「2.3 添加新的开发分支」功能。", 'error')
         return
@@ -1950,6 +2063,7 @@ def create_integration_branch():
             return
         result = _merge_into_integration(int_branch, feature_branches, action_name="合并")
         if result and result['succeeded']:
+            write_integration_description_commit(int_branch, result['succeeded'])
             offer_push_branch(
                 int_branch,
                 prompt=f"是否将更新后的集成分支 [{int_branch}] 推送到远端？",
@@ -1967,6 +2081,8 @@ def create_integration_branch():
 
     result = _merge_into_integration(int_branch, feature_branches, action_name="合并")
     if result is not False:
+        if result and result.get('succeeded'):
+            write_integration_description_commit(int_branch, result['succeeded'])
         offer_push_branch(
             int_branch,
             set_upstream=True,

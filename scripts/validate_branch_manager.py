@@ -160,12 +160,14 @@ def setup_repo() -> None:
 
 
 def create_feature_branches() -> None:
-    _, output = run_flow(bm.create_feature_branch, ["1", "test1"])
+    _, output = run_flow(bm.create_feature_branch, ["1", "test1", "feature_test1 描述"])
     assert_true(FEATURE_1 in output, "未成功创建 feature_test1 分支")
+    assert_true("已记录版本描述: feature_test1 描述" in output, "feature_test1 未写入版本描述")
 
     git("checkout", "master")
-    _, output = run_flow(bm.create_feature_branch, ["1", "test2"])
+    _, output = run_flow(bm.create_feature_branch, ["1", "test2", "feature_test2 描述"])
     assert_true(FEATURE_2 in output, "未成功创建 feature_test2 分支")
+    assert_true("已记录版本描述: feature_test2 描述" in output, "feature_test2 未写入版本描述")
 
     branches = local_branches()
     assert_true(FEATURE_1 in branches, f"缺少分支 {FEATURE_1}")
@@ -176,6 +178,16 @@ def create_initial_integration() -> None:
     _, output = run_flow(bm.create_integration_branch, ["1", "3.5.0", "all", "y"])
     assert_true(DEV_350 in output, "未成功创建初始集成分支")
     assert_true(DEV_350 in local_branches(), f"缺少分支 {DEV_350}")
+    assert_true(
+        f"已写入集成分支描述提交: {DEV_350}" in output,
+        "集成分支应聚合开发分支的 [DREO-DESC] 写入描述提交",
+    )
+    latest_subject = git("log", "-1", "--pretty=format:%s", DEV_350)
+    assert_true(
+        latest_subject == f"{bm.DESC_TAG}feature_test1 描述,feature_test2 描述"
+        or latest_subject == f"{bm.DESC_TAG}feature_test2 描述,feature_test1 描述",
+        f"集成分支描述提交格式不正确: {latest_subject}",
+    )
 
 
 def advance_master_after_integration() -> None:

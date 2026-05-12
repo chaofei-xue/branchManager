@@ -45,10 +45,12 @@ def parse_args() -> argparse.Namespace:
         ),
         epilog=(
             "参数格式：\n"
-            "  1 <feature|bugfix> <名称> [master|current]\n"
-            "      创建开发分支，基线默认 master。\n\n"
+            "  1 <feature|bugfix> <名称> [master|current] --desc \"<描述>\"\n"
+            "      创建开发分支，基线默认 master。\n"
+            "      --desc 必填，会在分支创建后写入 [DREO-DESC] 描述提交。\n\n"
             "  2 1 <dev|release> <版本> <开发分支1> [开发分支2 ...]\n"
-            "      创建集成分支，并把指定开发分支集成进去。\n\n"
+            "      创建集成分支，并把指定开发分支集成进去。\n"
+            "      release 可用 --from-dev <dev分支名> 替代手动指定开发分支。\n\n"
             "  2 2 <集成分支名>\n"
             "      更新指定集成分支，先同步已集成开发分支的新提交，再同步 master。\n\n"
             "  2 3 <集成分支名> <开发分支1> [开发分支2 ...]\n"
@@ -69,6 +71,8 @@ def parse_args() -> argparse.Namespace:
             "示例:\n"
             "  dreo_branch_operate 2 2 dev_3.6.0_20260319\n"
             "  dreo_branch_operate 1 feature test1 master\n"
+            "  dreo_branch_operate 1 feature login master --desc 登录开发\n"
+            "  dreo_branch_operate 2 1 release 3.6.0 --from-dev dev_3.6.0_20260415\n"
             "  dreo_branch_operate 2 3 dev_3.6.0_20260319 feature_test1_20260319 feature_test2_20260319\n"
             "  dreo_branch_operate 5 release_3.5.0_20260324 --push --delete-related\n"
             "  dreo_branch_operate 7 2 feature_test1_20260324 feature_test2_20260324"
@@ -85,6 +89,16 @@ def parse_args() -> argparse.Namespace:
         "--delete-related",
         action="store_true",
         help="用于“合并集成分支到 master”场景，合并成功后自动删除关联开发分支。",
+    )
+    parser.add_argument(
+        "--desc",
+        default="",
+        help="菜单 1 创建开发分支时必填。写入 [DREO-DESC] 描述提交以标记分支用途。",
+    )
+    parser.add_argument(
+        "--from-dev",
+        default="",
+        help="菜单 2 1 创建 release 分支时可选。指定已有 dev 集成分支名，自动继承其开发分支。",
     )
     args = parser.parse_args()
     args.menu1 = args.items[0]
@@ -155,6 +169,18 @@ def make_confirm(enable_delete_related: bool):
     return _confirm
 
 
+def make_text_input_queue(values):
+    """按调用顺序逐个返回预设文本，超出后返回最后一个值（多为空串）。"""
+    queue = list(values)
+
+    def _read_text_input(prompt, prefix='> '):
+        if queue:
+            return queue.pop(0)
+        return values[-1] if values else ""
+
+    return _read_text_input
+
+
 def make_offer_push(enable_push: bool):
     def _offer_push(branch, set_upstream=False, prompt=None):
         if not enable_push:
@@ -221,9 +247,12 @@ def run_create_feature(args: argparse.Namespace) -> bool:
         select_targets.append(master if base_name == "master" else current)
     select_targets.append(branch_type)
 
+    description = (args.desc or "").strip()
+    if not description:
+        fail("创建开发分支必须提供 --desc 参数以标记分支用途。")
     with patched_manager(
         select_one=make_select_one(select_targets),
-        read_text_input=lambda prompt, prefix='> ': name,
+        read_text_input=make_text_input_queue([name, description]),
         confirm=make_confirm(enable_delete_related=False),
         offer_push_branch=make_offer_push(args.push),
         handle_conflict=make_noninteractive_conflict_handler(),
@@ -233,22 +262,44 @@ def run_create_feature(args: argparse.Namespace) -> bool:
 
 
 def run_create_integration(args: argparse.Namespace) -> bool:
-    if len(args.params) < 3:
-        fail("创建集成分支需要参数：<dev|release> <版本> <开发分支1> [开发分支2 ...]")
-    env_prefix, version = args.params[0], args.params[1]
-    branches = args.params[2:]
+    env_prefix, version = args.params[0], args.params[1] if len(args.params) >= 2 else ""
     if env_prefix not in ("dev", "release"):
         fail("集成用途只能是 dev 或 release。")
+    if not version:
+        fail("创建集成分支需要版本号参数。")
 
-    with patched_manager(
-        select_one=make_select_one([env_prefix]),
-        select_many=make_select_many(branches),
-        read_text_input=lambda prompt, prefix='> ': version,
-        confirm=make_confirm(enable_delete_related=False),
-        offer_push_branch=make_offer_push(args.push),
-        handle_conflict=make_noninteractive_conflict_handler(),
-    ):
-        result = bm.create_integration_branch()
+    from_dev = (getattr(args, 'from_dev', '') or '').strip()
+
+    if env_prefix == 'release' and from_dev:
+        inherited = bm.get_merged_feature_branches(from_dev)
+        if not inherited:
+            fail(f"[{from_dev}] 没有找到任何已集成的开发分支记录。")
+        select_targets = [env_prefix, "从已有 dev 集成分支继承", from_dev]
+        with patched_manager(
+            select_one=make_select_one(select_targets),
+            select_many=make_select_many(inherited),
+            read_text_input=lambda prompt, prefix='> ': version,
+            confirm=make_confirm(enable_delete_related=False),
+            offer_push_branch=make_offer_push(args.push),
+            handle_conflict=make_noninteractive_conflict_handler(),
+        ):
+            result = bm.create_integration_branch()
+    else:
+        branches = args.params[2:]
+        if not branches:
+            fail("创建集成分支需要参数：<dev|release> <版本> <开发分支1> [开发分支2 ...]")
+        select_targets = [env_prefix]
+        if env_prefix == 'release':
+            select_targets.append("手动选择开发分支")
+        with patched_manager(
+            select_one=make_select_one(select_targets),
+            select_many=make_select_many(branches),
+            read_text_input=lambda prompt, prefix='> ': version,
+            confirm=make_confirm(enable_delete_related=False),
+            offer_push_branch=make_offer_push(args.push),
+            handle_conflict=make_noninteractive_conflict_handler(),
+        ):
+            result = bm.create_integration_branch()
     return result is not False
 
 

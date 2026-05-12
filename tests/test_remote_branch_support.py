@@ -143,7 +143,7 @@ class RemoteBranchSupportTest(unittest.TestCase):
         branch = f"feature_test_{TEST_DATE}"
         self.create_remote_feature(branch, "remote feature commit")
 
-        _, output = run_flow(self.repo, bm.create_feature_branch, ["1", "test"])
+        _, output = run_flow(self.repo, bm.create_feature_branch, ["1", "test", "远端恢复"])
 
         self.assertIn("检测到同名远端分支", output)
         self.assertIn(branch, self.local_branches())
@@ -159,13 +159,148 @@ class RemoteBranchSupportTest(unittest.TestCase):
         _, output = run_flow(
             self.repo,
             bm.create_feature_branch,
-            ["2", "y", "1", "child", "n"],
+            ["2", "y", "1", "child", "子分支开发", "n"],
         )
 
         child = f"feature_child_{TEST_DATE}"
         self.assertIn(f"已创建并切换到: {child}  (基于 {parent})", output)
         self.assertEqual(git(self.repo, "rev-parse", "--abbrev-ref", "HEAD"), child)
         self.assertTrue((self.repo / "parent.txt").exists())
+
+    def test_create_feature_branch_writes_description_commit(self) -> None:
+        _, output = run_flow(
+            self.repo,
+            bm.create_feature_branch,
+            ["1", "desc", "登录开发", "n"],
+        )
+
+        branch = f"feature_desc_{TEST_DATE}"
+        self.assertIn(f"已创建并切换到: {branch}  (基于 master)", output)
+        self.assertIn("已记录版本描述: 登录开发", output)
+        latest = git(self.repo, "log", "-1", "--pretty=format:%s", branch)
+        self.assertEqual(latest, f"{bm.DESC_TAG}登录开发")
+        self.assertEqual(bm.get_branch_description.__name__, "get_branch_description")
+        with pushd(self.repo):
+            self.assertEqual(bm.get_branch_description(branch), "登录开发")
+
+    def test_create_feature_branch_requires_nonempty_description(self) -> None:
+        _, output = run_flow(
+            self.repo,
+            bm.create_feature_branch,
+            ["1", "nodesc", "", "必填描述", "n"],
+        )
+
+        branch = f"feature_nodesc_{TEST_DATE}"
+        self.assertIn(f"已创建并切换到: {branch}", output)
+        self.assertIn("版本描述不能为空", output)
+        self.assertIn("已记录版本描述: 必填描述", output)
+        latest = git(self.repo, "log", "-1", "--pretty=format:%s", branch)
+        self.assertEqual(latest, f"{bm.DESC_TAG}必填描述")
+
+    def test_create_integration_branch_writes_description_summary(self) -> None:
+        run_flow(self.repo, bm.create_feature_branch, ["1", "login", "登录开发", "n"])
+        git(self.repo, "checkout", "master")
+        run_flow(self.repo, bm.create_feature_branch, ["1", "signup", "注册开发", "n"])
+        git(self.repo, "checkout", "master")
+
+        _, output = run_flow(
+            self.repo,
+            bm.create_integration_branch,
+            ["1", "1.0.0", "all", "y", "n"],
+        )
+
+        integration = f"dev_1.0.0_{TEST_DATE}"
+        self.assertIn(f"已创建集成分支: {integration}", output)
+        self.assertIn(f"已写入集成分支描述提交: {integration}", output)
+        latest = git(
+            self.repo,
+            "log",
+            "-1",
+            "--pretty=format:%s",
+            integration,
+        )
+        self.assertEqual(latest, f"{bm.DESC_TAG}登录开发,注册开发")
+
+    def test_create_release_branch_inherits_from_dev(self) -> None:
+        feature_a = f"feature_rela_{TEST_DATE}"
+        feature_b = f"feature_relb_{TEST_DATE}"
+        dev_branch = f"dev_3.0.0_{TEST_DATE}"
+        release_branch = f"release_3.0.0_{TEST_DATE}"
+
+        run_flow(self.repo, bm.create_feature_branch, ["1", "rela", "功能A", "n"])
+        git(self.repo, "checkout", "master")
+        run_flow(self.repo, bm.create_feature_branch, ["1", "relb", "功能B", "n"])
+        git(self.repo, "checkout", "master")
+
+        # 创建 dev 集成分支，把两个 feature 集成进去
+        run_flow(
+            self.repo,
+            bm.create_integration_branch,
+            ["1", "3.0.0", "all", "y", "n"],
+        )
+        git(self.repo, "checkout", "master")
+
+        # 创建 release 分支，选择"从已有 dev 集成分支继承"
+        # select_one: "2"=release, "2"=从 dev 继承, "1"=选择第一个 dev 分支
+        # select_many: "all"=全选继承的开发分支
+        _, output = run_flow(
+            self.repo,
+            bm.create_integration_branch,
+            ["2", "3.0.0", "2", "1", "all", "y", "n"],
+        )
+
+        self.assertIn(f"已创建集成分支: {release_branch}", output)
+        self.assertIn(f"从 [{dev_branch}] 继承", output)
+        self.assertIn(release_branch, self.local_branches())
+
+        tracking = self.tracking_subjects(release_branch)
+        self.assertTrue(len(tracking) > 0)
+        subject = tracking[0]
+        self.assertIn(feature_a, subject)
+        self.assertIn(feature_b, subject)
+
+    def test_create_release_branch_manual_select(self) -> None:
+        run_flow(self.repo, bm.create_feature_branch, ["1", "manual", "手动选择", "n"])
+        git(self.repo, "checkout", "master")
+
+        # 先创建一个 dev 分支使两种选项出现
+        run_flow(
+            self.repo,
+            bm.create_integration_branch,
+            ["1", "4.0.0", "all", "y", "n"],
+        )
+        git(self.repo, "checkout", "master")
+
+        feature = f"feature_manual_{TEST_DATE}"
+        release = f"release_4.0.0_{TEST_DATE}"
+
+        # 创建 release 分支，选"手动选择开发分支"
+        # select_one: "2"=release, "1"=手动选择
+        _, output = run_flow(
+            self.repo,
+            bm.create_integration_branch,
+            ["2", "4.0.0", "1", "all", "y", "n"],
+        )
+
+        self.assertIn(f"已创建集成分支: {release}", output)
+        self.assertIn(release, self.local_branches())
+
+    def test_create_release_no_dev_branches_skips_source_selection(self) -> None:
+        run_flow(self.repo, bm.create_feature_branch, ["1", "nodev", "无dev", "n"])
+        git(self.repo, "checkout", "master")
+
+        feature = f"feature_nodev_{TEST_DATE}"
+        release = f"release_5.0.0_{TEST_DATE}"
+
+        # 没有 dev 分支时，release 直接进入选择开发分支流程，不弹选择来源
+        _, output = run_flow(
+            self.repo,
+            bm.create_integration_branch,
+            ["2", "5.0.0", "all", "y", "n"],
+        )
+
+        self.assertIn(f"已创建集成分支: {release}", output)
+        self.assertIn(release, self.local_branches())
 
     def test_create_integration_branch_can_merge_remote_only_feature(self) -> None:
         feature = f"feature_alpha_{TEST_DATE}"
