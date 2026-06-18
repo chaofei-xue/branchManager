@@ -40,7 +40,7 @@ def today_str():
     return date.today().strftime('%Y%m%d')
 
 
-APP_VERSION = "1.0.5"
+APP_VERSION = "1.0.6"
 INSTALL_METADATA_FILE = "dreo_branch_manager_meta.json"
 
 
@@ -1663,6 +1663,8 @@ def write_description_commit(description, branch_label=None):
 
 def get_branch_description(branch):
     """读取目标分支上最近一条 [DREO-DESC] 描述。
+    使用 --first-parent 只遍历分支自身的提交链，避免从合并进来的
+    其他分支历史中误读到不属于本分支的描述标签。
     优先读取远端引用，远端不存在再读取本地，未找到时返回空字符串。
     """
     if not branch:
@@ -1672,8 +1674,8 @@ def get_branch_description(branch):
     else:
         ref = branch
     ok, log, _ = run_git(
-        'log', ref, '-F', f'--grep={DESC_TAG}', '--pretty=format:%s',
-        capture=True,
+        'log', ref, '--first-parent', '-F', f'--grep={DESC_TAG}',
+        '--pretty=format:%s', capture=True,
     )
     if not ok:
         return ''
