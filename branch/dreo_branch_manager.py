@@ -543,6 +543,24 @@ def is_managed_integration_branch(branch):
     return bool(MANAGED_BRANCH_PATTERNS['integration'].match(branch))
 
 
+def get_tracked_integration_branch_names():
+    """通过 [DREO-MERGE] 记录识别曾作为集成分支使用的分支名（含自定义命名）。"""
+    _, log, _ = run_git('log', '--all', '-F', f'--grep={MERGE_TAG}', '--pretty=format:%s')
+    names = set()
+    marker = f"{MERGE_TAG} "
+    sep = ' <- '
+    for line in log.splitlines():
+        if not line.startswith(marker):
+            continue
+        rest = line[len(marker):]
+        if sep not in rest:
+            continue
+        name = rest.split(sep, 1)[0].strip()
+        if name:
+            names.add(name)
+    return names
+
+
 def refresh_remote_refs():
     if not has_default_remote():
         return False
@@ -696,9 +714,15 @@ def get_feature_branches():
 
 
 def get_integration_branches():
+    all_branches = set(get_local_branches() + get_remote_branches())
+    tracked = get_tracked_integration_branch_names()
+    base = get_master_branch()
     branches = {
-        b for b in get_local_branches() + get_remote_branches()
-        if is_managed_integration_branch(b)
+        b for b in all_branches
+        if (
+            is_managed_integration_branch(b)
+            or (b in tracked and not is_managed_feature_branch(b) and b != base)
+        )
     }
     return sort_branches_by_date(list(branches), limit=len(branches))
 
@@ -717,7 +741,11 @@ def get_master_branch():
 
 
 def is_integration_branch(branch):
-    return branch.startswith('dev_') or branch.startswith('release_')
+    if branch.startswith('dev_') or branch.startswith('release_'):
+        return True
+    if is_managed_feature_branch(branch):
+        return False
+    return branch in get_tracked_integration_branch_names()
 
 
 def get_unmerged_files():
@@ -2031,29 +2059,53 @@ def create_integration_branch():
 
     print(f"  {icon_slot(UI['type'], '36')} 请选择集成分支用途：")
     env_idx = select_one(
-        ['dev     — 测试/日常环境集成', 'release — 预发/生产环境集成'],
+        [
+            'dev     — 测试/日常环境集成',
+            'release — 预发/生产环境集成',
+            'custom  — 自定义分支名（不加前缀与日期）',
+        ],
         "集成用途"
     )
     if env_idx is None:
         return False
-    env_prefix = ['dev', 'release'][env_idx]
+    env_mode = ['dev', 'release', 'custom'][env_idx]
 
-    date_suffix = today_str()
-    while True:
-        version = read_text_input(
-            f"版本号或名称（将创建: {env_prefix}_<版本>_{date_suffix}，直接回车返回）",
-            prefix='> ',
-        )
-        if not version:
-            return False
-        int_branch = f"{env_prefix}_{version}_{date_suffix}"
-        if not is_valid_branch_name(int_branch):
-            note("包含非法字符或不符合 Git 规范，请重新输入。", 'warn')
-            continue
-        break
+    if env_mode == 'custom':
+        while True:
+            int_branch = read_text_input(
+                "自定义分支名（将原样使用，不加前缀与日期；直接回车返回）",
+                prefix='> ',
+            )
+            if not int_branch:
+                return False
+            if int_branch in ('master', 'main') or int_branch == base:
+                note("不能使用主干分支名，请重新输入。", 'warn')
+                continue
+            if is_managed_feature_branch(int_branch):
+                note("该名称符合开发分支命名，请改用「1. 创建开发分支」或更换名称。", 'warn')
+                continue
+            if not is_valid_branch_name(int_branch):
+                note("包含非法字符或不符合 Git 规范，请重新输入。", 'warn')
+                continue
+            break
+    else:
+        env_prefix = env_mode
+        date_suffix = today_str()
+        while True:
+            version = read_text_input(
+                f"版本号或名称（将创建: {env_prefix}_<版本>_{date_suffix}，直接回车返回）",
+                prefix='> ',
+            )
+            if not version:
+                return False
+            int_branch = f"{env_prefix}_{version}_{date_suffix}"
+            if not is_valid_branch_name(int_branch):
+                note("包含非法字符或不符合 Git 规范，请重新输入。", 'warn')
+                continue
+            break
 
     # release 分支新增：选择集成来源方式
-    if env_prefix == 'release':
+    if env_mode == 'release':
         dev_branches = [b for b in get_integration_branches() if b.startswith('dev_')]
         if dev_branches:
             print(f"\n  {icon_slot(UI['select'], '36')} 请选择 release 集成来源：")
@@ -2196,7 +2248,7 @@ def update_integration_branch():
 
     int_branches = get_integration_branches()
     if not int_branches:
-        note("没有找到集成分支（dev_ / release_ 开头）。", 'error')
+        note("没有找到集成分支（dev_ / release_ 或带集成记录的自定义分支）。", 'error')
         return
 
     # 选择要更新的集成分支

@@ -223,6 +223,31 @@ class BranchOperateTest(unittest.TestCase):
         self.assertIn("执行结果: 成功", result.stdout)
         self.assertTrue(result.stdout.strip().endswith("DREO_RESULT=SUCCESS"))
 
+    def test_operate_create_custom_integration_branch(self) -> None:
+        feature = f"feature_customop_{date.today().strftime('%Y%m%d')}"
+        custom_branch = "staging/qa-build"
+
+        git(self.repo, "checkout", "-b", feature)
+        (self.repo / "custom.txt").write_text("v1\n", encoding="utf-8")
+        git(self.repo, "add", "custom.txt")
+        git(self.repo, "commit", "-m", "feature custom")
+        git(self.repo, "commit", "--allow-empty", "-m", "[DREO-DESC]自定义集成测试")
+        git(self.repo, "push", "-u", "origin", feature)
+        git(self.repo, "checkout", "master")
+
+        result = subprocess.run(
+            [sys.executable, str(OPERATE), "2", "1", "custom", custom_branch, feature],
+            cwd=self.repo,
+            text=True,
+            capture_output=True,
+        )
+
+        self.assertEqual(result.returncode, 0, msg=result.stdout + "\n" + result.stderr)
+        self.assertIn(f"已创建集成分支: {custom_branch}", result.stdout)
+        self.assertIn("执行结果: 成功", result.stdout)
+        branches = set(git(self.repo, "branch", "--format=%(refname:short)").splitlines())
+        self.assertIn(custom_branch, branches)
+
 
 if __name__ == "__main__":
     unittest.main()

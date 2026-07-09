@@ -50,7 +50,9 @@ def parse_args() -> argparse.Namespace:
             "      --desc 必填，会在分支创建后写入 [DREO-DESC] 描述提交。\n\n"
             "  2 1 <dev|release> <版本> <开发分支1> [开发分支2 ...]\n"
             "      创建集成分支，并把指定开发分支集成进去。\n"
-            "      release 可用 --from-dev <dev分支名> 替代手动指定开发分支。\n\n"
+            "      release 可用 --from-dev <dev分支名> 替代手动指定开发分支。\n"
+            "  2 1 custom <完整分支名> <开发分支1> [开发分支2 ...]\n"
+            "      创建自定义名集成分支（不加前缀与日期）。\n\n"
             "  2 2 <集成分支名>\n"
             "      更新指定集成分支，先同步已集成开发分支的新提交，再同步 master。\n\n"
             "  2 3 <集成分支名> <开发分支1> [开发分支2 ...]\n"
@@ -73,6 +75,7 @@ def parse_args() -> argparse.Namespace:
             "  dreo_branch_operate 1 feature test1 master\n"
             "  dreo_branch_operate 1 feature login master --desc 登录开发\n"
             "  dreo_branch_operate 2 1 release 3.6.0 --from-dev dev_3.6.0_20260415\n"
+            "  dreo_branch_operate 2 1 custom hotfix/demo feature_a_20260319\n"
             "  dreo_branch_operate 2 3 dev_3.6.0_20260319 feature_test1_20260319 feature_test2_20260319\n"
             "  dreo_branch_operate 5 release_3.5.0_20260324 --push --delete-related\n"
             "  dreo_branch_operate 7 2 feature_test1_20260324 feature_test2_20260324"
@@ -262,19 +265,42 @@ def run_create_feature(args: argparse.Namespace) -> bool:
 
 
 def run_create_integration(args: argparse.Namespace) -> bool:
-    env_prefix, version = args.params[0], args.params[1] if len(args.params) >= 2 else ""
-    if env_prefix not in ("dev", "release"):
-        fail("集成用途只能是 dev 或 release。")
-    if not version:
-        fail("创建集成分支需要版本号参数。")
+    env_mode = args.params[0] if args.params else ""
+    if env_mode not in ("dev", "release", "custom"):
+        fail("集成用途只能是 dev、release 或 custom。")
 
     from_dev = (getattr(args, 'from_dev', '') or '').strip()
 
-    if env_prefix == 'release' and from_dev:
+    if env_mode == 'custom':
+        if from_dev:
+            fail("custom 模式不支持 --from-dev。")
+        if len(args.params) < 3:
+            fail("创建自定义集成分支需要参数：custom <完整分支名> <开发分支1> [开发分支2 ...]")
+        branch_name, branches = args.params[1], args.params[2:]
+        if branch_name in ("master", "main"):
+            fail("不能使用主干分支名作为自定义集成分支。")
+        if bm.is_managed_feature_branch(branch_name):
+            fail("自定义集成分支名不能使用开发分支命名格式。")
+        with patched_manager(
+            select_one=make_select_one(["custom"]),
+            select_many=make_select_many(branches),
+            read_text_input=lambda prompt, prefix='> ': branch_name,
+            confirm=make_confirm(enable_delete_related=False),
+            offer_push_branch=make_offer_push(args.push),
+            handle_conflict=make_noninteractive_conflict_handler(),
+        ):
+            result = bm.create_integration_branch()
+        return result is not False
+
+    version = args.params[1] if len(args.params) >= 2 else ""
+    if not version:
+        fail("创建集成分支需要版本号参数。")
+
+    if env_mode == 'release' and from_dev:
         inherited = bm.get_merged_feature_branches(from_dev)
         if not inherited:
             fail(f"[{from_dev}] 没有找到任何已集成的开发分支记录。")
-        select_targets = [env_prefix, "从已有 dev 集成分支继承", from_dev]
+        select_targets = [env_mode, "从已有 dev 集成分支继承", from_dev]
         with patched_manager(
             select_one=make_select_one(select_targets),
             select_many=make_select_many(inherited),
@@ -288,8 +314,8 @@ def run_create_integration(args: argparse.Namespace) -> bool:
         branches = args.params[2:]
         if not branches:
             fail("创建集成分支需要参数：<dev|release> <版本> <开发分支1> [开发分支2 ...]")
-        select_targets = [env_prefix]
-        if env_prefix == 'release':
+        select_targets = [env_mode]
+        if env_mode == 'release':
             select_targets.append("手动选择开发分支")
         with patched_manager(
             select_one=make_select_one(select_targets),

@@ -304,6 +304,31 @@ class RemoteBranchSupportTest(unittest.TestCase):
         self.assertIn(f"已创建集成分支: {release}", output)
         self.assertIn(release, self.local_branches())
 
+    def test_create_custom_integration_branch_uses_literal_name(self) -> None:
+        run_flow(self.repo, bm.create_feature_branch, ["1", "customfeat", "自定义集成", "n"])
+        git(self.repo, "checkout", "master")
+
+        feature = f"feature_customfeat_{TEST_DATE}"
+        custom_branch = "hotfix/demo-integration"
+
+        _, output = run_flow(
+            self.repo,
+            bm.create_integration_branch,
+            ["3", custom_branch, "all", "y", "n"],
+        )
+
+        self.assertIn(f"已创建集成分支: {custom_branch}", output)
+        self.assertIn(custom_branch, self.local_branches())
+        self.assertFalse(any(
+            b.startswith("dev_") and custom_branch in b
+            for b in self.local_branches()
+        ))
+        with pushd(self.repo):
+            self.assertIn(custom_branch, bm.get_integration_branches())
+
+        tracking = self.tracking_subjects(custom_branch)
+        self.assertTrue(any(feature in subject for subject in tracking))
+
     def test_create_integration_branch_can_merge_remote_only_feature(self) -> None:
         feature = f"feature_alpha_{TEST_DATE}"
         integration = f"dev_1.0.0_{TEST_DATE}"
