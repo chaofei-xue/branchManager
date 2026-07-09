@@ -219,7 +219,9 @@ class RemoteBranchSupportTest(unittest.TestCase):
             "--pretty=format:%s",
             integration,
         )
-        self.assertEqual(latest, f"{bm.DESC_TAG}登录开发,注册开发")
+        self.assertTrue(latest.startswith(bm.DESC_TAG))
+        descs = set(latest[len(bm.DESC_TAG):].split(','))
+        self.assertEqual(descs, {'登录开发', '注册开发'})
 
     def test_create_release_branch_inherits_from_dev(self) -> None:
         feature_a = f"feature_rela_{TEST_DATE}"
@@ -610,6 +612,52 @@ class RemoteBranchSupportTest(unittest.TestCase):
         self.assertEqual((self.repo / "integration-target.txt").read_text(encoding="utf-8"), "target remote update\n")
         self.assertEqual((self.repo / "add-sync.txt").read_text(encoding="utf-8"), "v2\n")
         self.assertIn(f"本地分支已同步到远端最新: {integration}", output)
+
+    def test_add_branches_consolidates_tracking_and_description(self) -> None:
+        feature_a = f"feature_cons_first_{TEST_DATE}"
+        feature_b = f"feature_cons_second_{TEST_DATE}"
+        integration = f"dev_5.0.0_{TEST_DATE}"
+
+        run_flow(self.repo, bm.create_feature_branch, ["1", "cons_first", "test1", "n"])
+        git(self.repo, "checkout", "master")
+
+        # 创建集成分支，只有一个 feature 可选，all 即选中它
+        run_flow(
+            self.repo,
+            bm.create_integration_branch,
+            ["1", "5.0.0", "all", "y", "n"],
+        )
+
+        tracking_before = self.tracking_subjects(integration)
+        self.assertEqual(len(tracking_before), 1)
+        self.assertIn(feature_a, tracking_before[0])
+        self.assertNotIn(feature_b, tracking_before[0])
+
+        # 创建第二个 feature
+        git(self.repo, "checkout", "master")
+        run_flow(self.repo, bm.create_feature_branch, ["1", "cons_second", "test2", "n"])
+        git(self.repo, "checkout", "master")
+
+        # 添加第二个 feature 到集成分支（只有一个候选）
+        _, output = run_flow(
+            self.repo,
+            bm.add_branches_to_integration,
+            ["1", "1", "y", "n"],
+        )
+
+        # DREO-MERGE 应包含两个 feature
+        tracking_after = self.tracking_subjects(integration)
+        latest_tracking = tracking_after[0]
+        self.assertIn(feature_a, latest_tracking)
+        self.assertIn(feature_b, latest_tracking)
+
+        # DREO-DESC 应包含两个描述
+        desc_subject = git(
+            self.repo, "log", integration, "--first-parent", "-F",
+            f"--grep={bm.DESC_TAG}", "--pretty=format:%s", "-1",
+        )
+        self.assertIn("test1", desc_subject)
+        self.assertIn("test2", desc_subject)
 
     def test_show_status_includes_local_and_remote_counts(self) -> None:
         local_feature = f"feature_local_{TEST_DATE}"

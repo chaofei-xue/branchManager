@@ -40,7 +40,7 @@ def today_str():
     return date.today().strftime('%Y%m%d')
 
 
-APP_VERSION = "1.0.6"
+APP_VERSION = "1.0.7"
 INSTALL_METADATA_FILE = "dreo_branch_manager_meta.json"
 
 
@@ -1885,8 +1885,13 @@ def create_feature_branch():
 
 # ─── 集成分支公共：选分支并合并 ──────────────────────────────────
 
-def _merge_into_integration(int_branch, candidates, action_name="合并"):
-    """将 candidates 中用户选中的分支合并到 int_branch，写追踪提交。"""
+def _merge_into_integration(int_branch, candidates, action_name="合并",
+                            already_merged=None):
+    """将 candidates 中用户选中的分支合并到 int_branch，写追踪提交。
+
+    already_merged: 已集成到该集成分支的开发分支列表（用于合并写入完整的
+    DREO-MERGE / DREO-DESC，使追加操作与一次性创建的结果一致）。
+    """
     sorted_c = sort_branches_by_date(candidates, limit=len(candidates))
     total = len(candidates)
     print(f"\n  {icon_slot(UI['feature_branch'], '36')} 选择要{action_name}到 [{int_branch}] 的开发分支（共 {total} 个，已按时间倒序排序）：")
@@ -1924,7 +1929,8 @@ def _merge_into_integration(int_branch, candidates, action_name="合并"):
             failed.append(branch)
 
     if succeeded:
-        write_tracking_commit(int_branch, succeeded)
+        all_branches = list(already_merged or []) + succeeded
+        write_tracking_commit(int_branch, all_branches)
 
     rows = []
     if succeeded:
@@ -1937,6 +1943,7 @@ def _merge_into_integration(int_branch, candidates, action_name="合并"):
         'selected': selected,
         'succeeded': succeeded,
         'failed': failed,
+        'all_merged': list(already_merged or []) + succeeded,
     }
 
 
@@ -2065,7 +2072,7 @@ def create_integration_branch():
             return
         result = _merge_into_integration(int_branch, feature_branches, action_name="合并")
         if result and result['succeeded']:
-            write_integration_description_commit(int_branch, result['succeeded'])
+            write_integration_description_commit(int_branch, result['all_merged'])
             offer_push_branch(
                 int_branch,
                 prompt=f"是否将更新后的集成分支 [{int_branch}] 推送到远端？",
@@ -2084,7 +2091,7 @@ def create_integration_branch():
     result = _merge_into_integration(int_branch, feature_branches, action_name="合并")
     if result is not False:
         if result and result.get('succeeded'):
-            write_integration_description_commit(int_branch, result['succeeded'])
+            write_integration_description_commit(int_branch, result['all_merged'])
         offer_push_branch(
             int_branch,
             set_upstream=True,
@@ -2110,9 +2117,10 @@ def add_branches_to_integration():
     int_branch = int_branches[idx]
 
     # 已集成的分支
-    already = set(get_merged_feature_branches(int_branch))
+    already = get_merged_feature_branches(int_branch)
+    already_set = set(already)
     all_features = get_feature_branches()
-    candidates = [b for b in all_features if b not in already]
+    candidates = [b for b in all_features if b not in already_set]
 
     if not candidates:
         note(f"所有开发分支均已集成到 [{int_branch}]，无可添加的分支。", 'tip')
@@ -2121,8 +2129,12 @@ def add_branches_to_integration():
     if already:
         print(f"\n  {icon_slot(UI['pinned'], '36')} 已集成: {', '.join(already)}")
 
-    result = _merge_into_integration(int_branch, candidates, action_name="添加")
+    result = _merge_into_integration(
+        int_branch, candidates, action_name="添加",
+        already_merged=already,
+    )
     if result and result['succeeded']:
+        write_integration_description_commit(int_branch, result['all_merged'])
         offer_push_branch(
             int_branch,
             prompt=f"是否将更新后的集成分支 [{int_branch}] 推送到远端？",
