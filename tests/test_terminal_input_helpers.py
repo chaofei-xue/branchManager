@@ -50,6 +50,7 @@ class TerminalInputHelpersTest(unittest.TestCase):
     def test_read_menu_input_recognizes_arrow_up(self) -> None:
         fake_in = FakeTTYIn()
         fake_out = FakeTTYOut()
+        bm._stdin_pushback.clear()
 
         with mock.patch.object(bm.sys, "stdin", fake_in), \
              mock.patch.object(bm.sys, "stdout", fake_out), \
@@ -65,6 +66,7 @@ class TerminalInputHelpersTest(unittest.TestCase):
     def test_read_text_input_ignores_escape_sequences(self) -> None:
         fake_in = FakeTTYIn()
         fake_out = FakeTTYOut()
+        bm._stdin_pushback.clear()
 
         with mock.patch.object(bm.sys, "stdin", fake_in), \
              mock.patch.object(bm.sys, "stdout", fake_out), \
@@ -77,11 +79,37 @@ class TerminalInputHelpersTest(unittest.TestCase):
              ), \
              mock.patch(
                  "select.select",
-                 side_effect=[([0], [], []), ([0], [], []), ([], [], [])],
+                 side_effect=[([0], [], []), ([0], [], []), ([], [], []), ([], [], [])],
              ):
             result = bm.read_text_input("输入测试")
 
         self.assertEqual(result, "ab")
+
+    def test_read_menu_input_drains_crlf_trailing_newline(self) -> None:
+        """CRLF 终端一次回车发 \\r\\n，残留 \\n 不应泄漏到下一次输入。"""
+        fake_in = FakeTTYIn()
+        fake_out = FakeTTYOut()
+        bm._stdin_pushback.clear()
+        reads = [b"1", b"\r", b"\n"]
+
+        with mock.patch.object(bm.sys, "stdin", fake_in), \
+             mock.patch.object(bm.sys, "stdout", fake_out), \
+             mock.patch("dreo_branch_manager.termios.tcgetattr", return_value=["settings"]), \
+             mock.patch("dreo_branch_manager.termios.tcsetattr"), \
+             mock.patch("dreo_branch_manager.tty.setraw"), \
+             mock.patch("dreo_branch_manager.os.read", side_effect=reads), \
+             mock.patch("select.select", return_value=([0], [], [])):
+            result = bm.read_menu_input()
+
+        self.assertEqual(result, "1")
+        self.assertEqual(bm._stdin_pushback, bytearray())
+
+    def test_select_many_confirms_on_first_enter(self) -> None:
+        options = [f"opt_{i}" for i in range(25)]
+        with mock.patch("dreo_branch_manager.read_menu_input", return_value="1,3"):
+            result = bm.select_many(options)
+
+        self.assertEqual(result, [0, 2])
 
     def test_has_merge_conflict_detects_unmerged_files(self) -> None:
         with mock.patch("dreo_branch_manager.get_unmerged_files", return_value=["README.md"]):

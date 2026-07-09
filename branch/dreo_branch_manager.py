@@ -257,6 +257,22 @@ def read_input(prompt, prefix='> ', redraw=False, echo_label=None):
     return value
 
 
+# raw 模式下误读的字节可推回，供后续 stdin 读取复用
+_stdin_pushback = bytearray()
+
+
+def _stdin_read(fd, n=1):
+    if _stdin_pushback:
+        take = min(n, len(_stdin_pushback))
+        data = bytes(_stdin_pushback[:take])
+        del _stdin_pushback[:take]
+        if take == n:
+            return data
+        rest = os.read(fd, n - take)
+        return data + (rest or b'')
+    return os.read(fd, n)
+
+
 def _drain_escape_sequence(fd):
     """读取并丢弃 ESC 后续字节，非阻塞方式避免挂起。"""
     import select as _select
@@ -264,7 +280,26 @@ def _drain_escape_sequence(fd):
         ready, _, _ = _select.select([fd], [], [], 0.05)
         if not ready:
             break
-        os.read(fd, 1)
+        _stdin_read(fd, 1)
+
+
+def _drain_crlf_newline(fd):
+    """raw 模式下回车可能是 \\r\\n：消费 \\r 后丢弃紧随的 \\n。
+
+    部分终端（Windows 风格 CRLF、部分 IDE/远程终端）会在一次回车时发送两个字节。
+    若不丢弃残留 \\n，下一次输入会立刻读到空行，表现为“需要按两次回车”。
+    """
+    import select as _select
+    if _stdin_pushback:
+        if _stdin_pushback[0:1] == b'\n':
+            del _stdin_pushback[0]
+        return
+    ready, _, _ = _select.select([fd], [], [], 0.05)
+    if not ready:
+        return
+    nxt = _stdin_read(fd, 1)
+    if nxt and nxt != b'\n':
+        _stdin_pushback.extend(nxt)
 
 
 def read_text_input(prompt, prefix='> '):
@@ -286,10 +321,12 @@ def read_text_input(prompt, prefix='> '):
         tty.setraw(fd)
         render()
         while True:
-            chunk = os.read(fd, 1)
+            chunk = _stdin_read(fd, 1)
             if not chunk:
                 break
             if chunk in (b'\r', b'\n'):
+                if chunk == b'\r':
+                    _drain_crlf_newline(fd)
                 break
             if chunk == b'\x03':
                 raise KeyboardInterrupt
@@ -336,10 +373,12 @@ def read_menu_input(prompt="", prefix='> '):
         tty.setraw(fd)
         render()
         while True:
-            chunk = os.read(fd, 1)
+            chunk = _stdin_read(fd, 1)
             if not chunk:
                 break
             if chunk in (b'\r', b'\n'):
+                if chunk == b'\r':
+                    _drain_crlf_newline(fd)
                 sys.stdout.write("\n")
                 sys.stdout.flush()
                 return ''.join(chars).strip()
@@ -352,12 +391,12 @@ def read_menu_input(prompt="", prefix='> '):
                 continue
             if chunk == b'\x1b':
                 ready, _, _ = _select.select([fd], [], [], 0.05)
-                if ready:
-                    seq = os.read(fd, 1)
+                if ready or _stdin_pushback:
+                    seq = _stdin_read(fd, 1)
                     if seq == b'[':
                         ready2, _, _ = _select.select([fd], [], [], 0.05)
-                        if ready2:
-                            code = os.read(fd, 1)
+                        if ready2 or _stdin_pushback:
+                            code = _stdin_read(fd, 1)
                             sys.stdout.write("\r\033[2K\n")
                             sys.stdout.flush()
                             if code == b'A':
@@ -750,26 +789,24 @@ def select_one(options, prompt="请选择"):
 
 
 def select_many(options, prompt="请选择（多个用逗号分隔，all=全选，0=返回）", auto_confirm_single=False):
-    """多选，返回 0-based 索引列表；输入 0 返回 None（返回上一级）"""
+    """多选，返回 0-based 索引列表；输入 0 返回 None（返回上一级）。
+
+    输入合法编号后一次回车即确认（短/长列表行为一致）。
+    跨页多选请用逗号分隔绝对编号（如 1,21）或 all。
+    auto_confirm_single 保留兼容旧调用，行为与默认一致。
+    """
     if not options:
         note("没有可选项。", 'warn')
         return None
 
     page = 0
-    selected = []
     while True:
         page, total_pages, start, end, window = page_window(options, page)
         for i, opt in enumerate(window, start + 1):
-            marker = '●' if (i - 1) in selected else '○'
-            print(f"  {accent(f'{i:>2}.')} {marker} {opt}")
+            print(f"  {accent(f'{i:>2}.')} {opt}")
         print(f"\n  {icon_slot(UI['menu'], '36')} {prompt}")
         if len(options) > PAGE_SIZE:
-            if auto_confirm_single:
-                print(f"  {muted(f' 当前第 {page + 1}/{total_pages} 页，方向键上/下翻页；输入单个编号后回车直接确认；多个编号用逗号分隔')}")
-            else:
-                print(f"  {muted(f' 当前第 {page + 1}/{total_pages} 页，方向键上/下翻页；输入编号后回车选择；直接回车确认')}")
-        elif selected:
-            print(f"  {muted(f' 已选择 {len(selected)} 项，直接回车确认')}")
+            print(f"  {muted(f' 当前第 {page + 1}/{total_pages} 页，方向键上/下翻页；输入编号后回车确认（多个用逗号分隔）')}")
 
         raw = read_menu_input("", prefix='> ') if len(options) > PAGE_SIZE else read_input("", prefix='> ')
         if raw == '0':
@@ -783,8 +820,6 @@ def select_many(options, prompt="请选择（多个用逗号分隔，all=全选�
             page = total_pages - 1 if page == 0 else page - 1
             continue
         if raw == '':
-            if selected:
-                return selected
             note("请至少选择一个选项。", 'warn')
             continue
 
@@ -800,17 +835,8 @@ def select_many(options, prompt="请选择（多个用逗号分隔，all=全选�
                 valid = False
                 break
         if valid and indices:
-            if auto_confirm_single and not selected and len(indices) == 1 and ',' not in raw:
-                return indices
-            if len(options) <= PAGE_SIZE:
-                return indices
-            for idx in indices:
-                if idx in selected:
-                    selected.remove(idx)
-                else:
-                    selected.append(idx)
-            selected.sort()
-        elif valid:
+            return indices
+        if valid:
             note("请至少选择一个选项。", 'warn')
 
 
@@ -2410,8 +2436,7 @@ def delete_branches(include_remote=False):
     print(f"  {icon_slot(UI['delete'], '36')} 选择要删除的分支：")
     selected_indices = select_many(
         display_options,
-        "多个用逗号分隔；all=全选；0=返回；长列表可用方向键上/下翻页，单个编号回车可直接确认",
-        auto_confirm_single=True,
+        "多个用逗号分隔；all=全选；0=返回；长列表可用方向键上/下翻页",
     )
     if selected_indices is None:
         return False
