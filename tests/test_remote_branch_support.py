@@ -1021,11 +1021,12 @@ class RemoteBranchSupportTest(unittest.TestCase):
         git(other, "commit", "-am", "release v2")
         git(other, "push", "origin", release)
 
-        _, output = run_flow(
-            self.repo,
-            bm.merge_to_master,
-            ["1", "y", "n"],
-        )
+        with mock.patch.object(bm, "run_git", wraps=bm.run_git) as run_git_mock:
+            _, output = run_flow(
+                self.repo,
+                bm.merge_to_master,
+                ["1", "y", "y"],
+            )
 
         self.assertEqual((self.repo / "release.txt").read_text(encoding="utf-8"), "v2\n")
         self.assertEqual(git(self.repo, "show", f"{release}:release.txt"), "v2")
@@ -1043,7 +1044,15 @@ class RemoteBranchSupportTest(unittest.TestCase):
             git(self.repo, "rev-parse", "master"),
         )
         self.assertIn("已根据发布分支", output)
-        self.assertIn("Tag [1.0.1] 已同步到远端 origin", output)
+        self.assertEqual(
+            git(self.remote, "rev-parse", "master"),
+            git(self.repo, "rev-parse", "master"),
+        )
+        self.assertTrue(any(
+            call.args[:3] == ("push", "--atomic", "origin")
+            for call in run_git_mock.call_args_list
+        ))
+        self.assertIn("[master] 与 Tag [1.0.1] 已原子推送到远端 origin", output)
 
     def test_merge_release_to_master_skips_when_release_is_already_merged(self) -> None:
         release = f"release_1.0.2_{TEST_DATE}"
@@ -1059,7 +1068,7 @@ class RemoteBranchSupportTest(unittest.TestCase):
         _, first_output = run_flow(
             self.repo,
             bm.merge_to_master,
-            ["1", "y", "n"],
+            ["1", "y", "y"],
         )
         first_head = git(self.repo, "rev-parse", "HEAD")
 
@@ -1071,7 +1080,7 @@ class RemoteBranchSupportTest(unittest.TestCase):
         _, second_output = run_flow(
             self.repo,
             bm.merge_to_master,
-            ["1", "y"],
+            ["1", "y", "n"],
         )
         second_head = git(self.repo, "rev-parse", "HEAD")
 
@@ -1080,6 +1089,128 @@ class RemoteBranchSupportTest(unittest.TestCase):
         self.assertEqual(first_head, git(self.repo, "rev-parse", "1.0.2^{}"))
         self.assertIn(f"[{release}] 已合并到 master，已跳过此次操作。", second_output)
         self.assertNotIn(f"[{release}] 已成功合并到 master！", second_output)
+
+    def test_already_merged_fast_forward_release_tags_release_tip(self) -> None:
+        release = f"release_1.0.3_{TEST_DATE}"
+
+        git(self.repo, "checkout", "master")
+        git(self.repo, "checkout", "-b", release)
+        (self.repo / "ff-release.txt").write_text("release\n", encoding="utf-8")
+        git(self.repo, "add", "ff-release.txt")
+        git(self.repo, "commit", "-m", "fast-forward release")
+        release_tip = git(self.repo, "rev-parse", "HEAD")
+        git(self.repo, "push", "-u", "origin", release)
+
+        git(self.repo, "checkout", "master")
+        git(self.repo, "merge", "--ff-only", release)
+        (self.repo / "after-ff-release.txt").write_text("next\n", encoding="utf-8")
+        git(self.repo, "add", "after-ff-release.txt")
+        git(self.repo, "commit", "-m", "master after fast-forward release")
+
+        result, output = run_flow(
+            self.repo,
+            bm.merge_to_master,
+            ["1", "y", "n"],
+        )
+
+        self.assertTrue(result)
+        self.assertEqual(git(self.repo, "rev-parse", "1.0.3^{}"), release_tip)
+        self.assertNotEqual(
+            git(self.repo, "rev-parse", "1.0.3^{}"),
+            git(self.repo, "rev-parse", "master"),
+        )
+        self.assertIn(f"[{release}] 已合并到 master，已跳过此次操作。", output)
+
+    def test_release_publish_failure_preserves_related_feature_branches(self) -> None:
+        feature = f"feature_release_publish_failure_{TEST_DATE}"
+        release = f"release_1.0.4_{TEST_DATE}"
+
+        git(self.repo, "checkout", "master")
+        git(self.repo, "checkout", "-b", feature)
+        (self.repo / "publish-failure.txt").write_text("feature\n", encoding="utf-8")
+        git(self.repo, "add", "publish-failure.txt")
+        git(self.repo, "commit", "-m", "publish failure feature")
+        git(self.repo, "push", "-u", "origin", feature)
+
+        git(self.repo, "checkout", "master")
+        git(self.repo, "checkout", "-b", release)
+        git(self.repo, "merge", "--no-ff", feature, "-m", f"Merge branch '{feature}' into {release}")
+        git(self.repo, "commit", "--allow-empty", "-m", f"{bm.MERGE_TAG} {release} <- {feature}")
+        git(self.repo, "push", "-u", "origin", release)
+        git(self.repo, "checkout", "master")
+
+        with mock.patch.object(bm, "push_release_refs", return_value=False):
+            result, output = run_flow(
+                self.repo,
+                bm.merge_to_master,
+                ["1", "y", "y"],
+            )
+
+        self.assertFalse(result)
+        self.assertIn(feature, self.local_branches())
+        self.assertIn(
+            f"origin/{feature}",
+            git(self.repo, "branch", "-r", "--format=%(refname:short)").splitlines(),
+        )
+        self.assertNotIn("是否立即删除这些关联开发分支", output)
+        self.assertIn("远端发布失败，已保留关联开发分支", output)
+
+    def test_atomic_release_push_does_not_partially_update_remote(self) -> None:
+        tag_name = "atomic-conflict"
+        remote_master_before = git(self.remote, "rev-parse", "master")
+
+        git(self.repo, "tag", tag_name, remote_master_before)
+        git(self.repo, "push", "origin", f"refs/tags/{tag_name}")
+        git(self.repo, "tag", "-d", tag_name)
+
+        (self.repo / "atomic-release.txt").write_text("release\n", encoding="utf-8")
+        git(self.repo, "add", "atomic-release.txt")
+        git(self.repo, "commit", "-m", "atomic release")
+        local_master = git(self.repo, "rev-parse", "master")
+        git(self.repo, "tag", tag_name, local_master)
+
+        with pushd(self.repo):
+            result = bm.push_release_refs("master", tag_name)
+
+        self.assertFalse(result)
+        self.assertEqual(git(self.remote, "rev-parse", "master"), remote_master_before)
+        self.assertEqual(
+            git(self.remote, "rev-parse", f"refs/tags/{tag_name}^{{}}"),
+            remote_master_before,
+        )
+
+    def test_release_tag_failure_preserves_related_feature_branches(self) -> None:
+        feature = f"feature_release_tag_failure_{TEST_DATE}"
+        release = f"release_1.0.5_{TEST_DATE}"
+
+        git(self.repo, "tag", "-a", "1.0.5", "-m", "existing tag")
+        git(self.repo, "checkout", "-b", feature)
+        (self.repo / "tag-failure.txt").write_text("feature\n", encoding="utf-8")
+        git(self.repo, "add", "tag-failure.txt")
+        git(self.repo, "commit", "-m", "tag failure feature")
+        git(self.repo, "push", "-u", "origin", feature)
+
+        git(self.repo, "checkout", "master")
+        git(self.repo, "checkout", "-b", release)
+        git(self.repo, "merge", "--no-ff", feature, "-m", f"Merge branch '{feature}' into {release}")
+        git(self.repo, "commit", "--allow-empty", "-m", f"{bm.MERGE_TAG} {release} <- {feature}")
+        git(self.repo, "push", "-u", "origin", release)
+        git(self.repo, "checkout", "master")
+
+        result, output = run_flow(
+            self.repo,
+            bm.merge_to_master,
+            ["1", "y"],
+        )
+
+        self.assertFalse(result)
+        self.assertIn(feature, self.local_branches())
+        self.assertIn(
+            f"origin/{feature}",
+            git(self.repo, "branch", "-r", "--format=%(refname:short)").splitlines(),
+        )
+        self.assertNotIn("是否立即删除这些关联开发分支", output)
+        self.assertIn("发布 Tag 创建失败，已保留关联开发分支", output)
 
     def test_merge_release_to_master_can_delete_related_feature_branches(self) -> None:
         feature = f"feature_release_cleanup_{TEST_DATE}"
@@ -1102,7 +1233,7 @@ class RemoteBranchSupportTest(unittest.TestCase):
         _, output = run_flow(
             self.repo,
             bm.merge_to_master,
-            ["1", "y", "n", "y"],
+            ["1", "y", "y", "y"],
         )
 
         self.assertNotIn(feature, self.local_branches())

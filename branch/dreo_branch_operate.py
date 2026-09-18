@@ -62,8 +62,9 @@ def parse_args() -> argparse.Namespace:
             "  4\n"
             "      将 master 合并到当前分支。\n\n"
             "  5 <release分支名>\n"
-            "      将指定 release 分支合并到 master，自动以版本号打 Tag 并推送远端。\n"
-            "      可选: --push --delete-related\n\n"
+            "      将指定 release 分支合并到 master，并自动以版本号创建 Tag。\n"
+            "      使用 --push 时将 master 与 Tag 原子推送到远端。\n"
+            "      可选: --push --delete-related（仅在原子推送成功后删除）\n\n"
             "  6\n"
             "      在当前仓库生成 HTML / Markdown 分支处理报告。\n\n"
             "  7 1 <分支1> [分支2 ...]\n"
@@ -204,6 +205,19 @@ def make_offer_push(enable_push: bool):
         return False
 
     return _offer_push
+
+
+def make_offer_publish_release(enable_push: bool):
+    def _offer_publish(base, tag_name):
+        if not enable_push:
+            bm.note(
+                f"参数模式未启用 --push，[{base}] 与 Tag [{tag_name}] 仅保留在本地。",
+                'tip',
+            )
+            return None
+        return bm.push_release_refs(base, tag_name)
+
+    return _offer_publish
 
 
 def make_noninteractive_conflict_handler():
@@ -385,7 +399,7 @@ def run_merge_to_master(args: argparse.Namespace) -> bool:
     with patched_manager(
         select_one=make_select_one([release_branch]),
         confirm=make_confirm(enable_delete_related=args.delete_related),
-        offer_push_branch=make_offer_push(args.push),
+        offer_publish_release=make_offer_publish_release(args.push),
         handle_conflict=make_noninteractive_conflict_handler(),
     ):
         result = bm.merge_to_master()

@@ -234,7 +234,7 @@ class BranchOperateTest(unittest.TestCase):
         git(self.repo, "checkout", "master")
 
         result = subprocess.run(
-            [sys.executable, str(OPERATE), "5", release],
+            [sys.executable, str(OPERATE), "5", release, "--push"],
             cwd=self.repo,
             text=True,
             capture_output=True,
@@ -243,8 +243,40 @@ class BranchOperateTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, msg=result.stdout + "\n" + result.stderr)
         master_head = git(self.repo, "rev-parse", "master")
         self.assertEqual(git(self.repo, "rev-parse", "3.6.0^{}"), master_head)
+        self.assertEqual(git(self.remote, "rev-parse", "master"), master_head)
         self.assertEqual(git(self.remote, "rev-parse", "refs/tags/3.6.0^{}"), master_head)
-        self.assertIn("Tag [3.6.0] 已同步到远端 origin", result.stdout)
+        self.assertIn("[master] 与 Tag [3.6.0] 已原子推送到远端 origin", result.stdout)
+        self.assertTrue(result.stdout.strip().endswith("DREO_RESULT=SUCCESS"))
+
+    def test_operate_merge_release_without_push_keeps_master_and_tag_local(self) -> None:
+        release = "release_3.6.1_20260319"
+        remote_master_before = git(self.remote, "rev-parse", "master")
+
+        git(self.repo, "checkout", "-b", release)
+        (self.repo / "local-release.txt").write_text("release\n", encoding="utf-8")
+        git(self.repo, "add", "local-release.txt")
+        git(self.repo, "commit", "-m", "local release ready")
+        git(self.repo, "push", "-u", "origin", release)
+        git(self.repo, "checkout", "master")
+
+        result = subprocess.run(
+            [sys.executable, str(OPERATE), "5", release],
+            cwd=self.repo,
+            text=True,
+            capture_output=True,
+        )
+
+        self.assertEqual(result.returncode, 0, msg=result.stdout + "\n" + result.stderr)
+        self.assertEqual(
+            git(self.repo, "rev-parse", "3.6.1^{}"),
+            git(self.repo, "rev-parse", "master"),
+        )
+        self.assertEqual(git(self.remote, "rev-parse", "master"), remote_master_before)
+        self.assertEqual(
+            git(self.remote, "show-ref", "--verify", "refs/tags/3.6.1", check=False),
+            "",
+        )
+        self.assertIn("Tag [3.6.1] 仅保留在本地", result.stdout)
         self.assertTrue(result.stdout.strip().endswith("DREO_RESULT=SUCCESS"))
 
     def test_operate_create_custom_integration_branch(self) -> None:

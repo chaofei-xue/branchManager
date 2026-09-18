@@ -2526,22 +2526,22 @@ def release_tag_from_branch(release_branch):
     return match.group(1) if match else ''
 
 
-def create_and_push_release_tag(release_branch, target_ref='HEAD'):
-    """为发布提交创建版本 Tag，并自动同步到默认远端。"""
+def create_release_tag(release_branch, target_ref='HEAD'):
+    """为发布提交创建版本 Tag，返回 Tag 名。"""
     tag_name = release_tag_from_branch(release_branch)
     if not tag_name:
         note(f"无法从发布分支 [{release_branch}] 提取版本号，未创建 Tag。", 'error')
-        return False
+        return None
 
     ok, _, err = run_git('check-ref-format', f'refs/tags/{tag_name}')
     if not ok:
         note(f"提取到的版本号 [{tag_name}] 不是有效的 Git Tag 名称: {err}", 'error')
-        return False
+        return None
 
     ok, target_sha, err = run_git('rev-parse', f'{target_ref}^{{commit}}')
     if not ok:
         note(f"无法解析 Tag 目标提交 [{target_ref}]: {err}", 'error')
-        return False
+        return None
 
     tag_exists, tag_sha, _ = run_git(
         'rev-parse', '-q', '--verify', f'refs/tags/{tag_name}^{{commit}}'
@@ -2552,38 +2552,75 @@ def create_and_push_release_tag(release_branch, target_ref='HEAD'):
                 f"Tag [{tag_name}] 已存在但指向其他提交，未覆盖现有 Tag。",
                 'error',
             )
-            return False
+            return None
         note(f"Tag [{tag_name}] 已存在且指向当前发布提交，跳过重复创建。", 'tip')
     else:
         ok, _, err = run_git('tag', tag_name, target_sha)
         if not ok:
             note(f"创建 Tag [{tag_name}] 失败: {err}", 'error')
-            return False
+            return None
         note(f"已根据发布分支 [{release_branch}] 创建 Tag: {tag_name}", 'success')
 
+    return tag_name
+
+
+def push_release_refs(base, tag_name):
+    """原子推送主干与发布 Tag，确保远端不会只更新其中一个引用。"""
     if not has_default_remote():
-        note(f"未检测到 {get_default_remote()} 远端，Tag [{tag_name}] 无法同步。", 'error')
+        note(f"未检测到 {get_default_remote()} 远端，无法发布主干与 Tag。", 'error')
         return False
 
     remote = get_default_remote()
-    with LoadingIndicator(f"正在推送 Tag [{tag_name}] 到远端"):
-        ok, _, err = run_git('push', remote, f'refs/tags/{tag_name}')
+    base_ref = f'refs/heads/{base}'
+    tag_ref = f'refs/tags/{tag_name}'
+    with LoadingIndicator(f"正在原子推送 [{base}] 与 Tag [{tag_name}] 到远端"):
+        ok, _, err = run_git(
+            'push',
+            '--atomic',
+            remote,
+            f'{base_ref}:{base_ref}',
+            f'{tag_ref}:{tag_ref}',
+        )
     if not ok:
-        note(f"Tag [{tag_name}] 推送到远端失败: {err}", 'error')
+        note(f"[{base}] 与 Tag [{tag_name}] 原子推送失败: {err}", 'error')
         return False
 
-    note(f"Tag [{tag_name}] 已同步到远端 {remote}。", 'success')
+    note(f"[{base}] 与 Tag [{tag_name}] 已原子推送到远端 {remote}。", 'success')
     return True
 
 
+def offer_publish_release(base, tag_name):
+    """询问是否将主干与 Tag 一并原子推送；None 表示主动跳过。"""
+    if not has_default_remote():
+        note(f"未检测到 {get_default_remote()} 远端，已保留本地主干与 Tag。", 'tip')
+        return None
+    if not confirm(f"是否将 [{base}] 与 Tag [{tag_name}] 原子推送到远端？"):
+        note(f"已跳过远端发布，本地保留 [{base}] 与 Tag [{tag_name}]。", 'warn')
+        return None
+    return push_release_refs(base, tag_name)
+
+
 def find_release_merge_commit(release_ref, base):
-    """查找主干上首次包含 release 最新提交的合并提交。"""
+    """查找直接合并 release 的提交；快进历史返回 release 尖端。"""
     ok, output, _ = run_git(
-        'rev-list', '--ancestry-path', '--reverse', f'{release_ref}..{base}'
+        'rev-list',
+        '--first-parent',
+        '--ancestry-path',
+        '--reverse',
+        f'{release_ref}..{base}',
     )
-    if ok and output:
-        return output.splitlines()[0]
-    return release_ref
+    if not ok or not output:
+        return release_ref
+
+    candidate = output.splitlines()[0]
+    parent_ok, first_parent, _ = run_git('rev-parse', f'{candidate}^1')
+    if not parent_ok:
+        return release_ref
+
+    release_on_first_parent, _, _ = run_git(
+        'merge-base', '--is-ancestor', release_ref, first_parent
+    )
+    return release_ref if release_on_first_parent else candidate
 
 
 def merge_to_master():
@@ -2622,22 +2659,35 @@ def merge_to_master():
     if already_merged:
         note(f"[{release_branch}] 已合并到 {base}，已跳过此次操作。", 'tip')
         tag_target = find_release_merge_commit(release_ref, base)
-        return create_and_push_release_tag(release_branch, tag_target)
+        tag_name = create_release_tag(release_branch, tag_target)
+        if not tag_name:
+            return False
+        return offer_publish_release(base, tag_name) is not False
 
     if do_merge(release_ref, display_branch=release_branch):
         _, log, _ = run_git('log', '--oneline', '-5')
         note(f"[{release_branch}] 已成功合并到 {base}！", 'success')
         print(f"\n  {icon_slot(UI['records'], '36')} 最近提交记录：")
         print_list(log.splitlines())
-        offer_push_branch(
-            base,
-            prompt=f"是否将 [{base}] 的最新合并结果推送到远端？",
-        )
-        tag_synced = create_and_push_release_tag(release_branch, base)
+        tag_name = create_release_tag(release_branch, base)
+        if not tag_name:
+            note("发布 Tag 创建失败，已保留关联开发分支。", 'error')
+            return False
+
+        publish_result = offer_publish_release(base, tag_name)
+        if publish_result is False:
+            note("远端发布失败，已保留关联开发分支。", 'error')
+            return False
+
         related_features = [
             branch for branch in get_merged_feature_branches(release_branch)
             if is_managed_feature_branch(branch)
         ]
+        if publish_result is None:
+            if related_features:
+                note("主干与 Tag 尚未发布到远端，已保留关联开发分支。", 'tip')
+            return True
+
         if related_features:
             print(f"\n  {icon_slot(UI['delete'], '36')} 检测到 [{release_branch}] 关联以下开发分支：")
             print_list([format_branch_with_location(branch) for branch in related_features])
@@ -2647,7 +2697,7 @@ def merge_to_master():
                 note("已保留关联开发分支，不做删除。", 'tip')
         else:
             note(f"未检测到 [{release_branch}] 的关联开发分支记录。", 'tip')
-        return tag_synced
+        return True
     else:
         note("合并失败或已放弃。", 'error')
         return False
