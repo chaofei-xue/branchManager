@@ -703,6 +703,61 @@ class RemoteBranchSupportTest(unittest.TestCase):
         self.assertIn("开发分支: 2（本地：1，远端：1）", output)
         self.assertIn("集成分支: 2（本地：1，远端：1）", output)
 
+    def test_show_status_includes_current_branch_integration_relationships(self) -> None:
+        feature_a = f"feature_status_a_{TEST_DATE}"
+        feature_b = f"bugfix_status_b_{TEST_DATE}"
+        integration = f"dev_6.0.0_{TEST_DATE}"
+
+        git(self.repo, "checkout", "-b", feature_a)
+        (self.repo / "status-a.txt").write_text("a\n", encoding="utf-8")
+        git(self.repo, "add", "status-a.txt")
+        git(self.repo, "commit", "-m", "status feature a")
+
+        git(self.repo, "checkout", "master")
+        git(self.repo, "checkout", "-b", feature_b)
+        (self.repo / "status-b.txt").write_text("b\n", encoding="utf-8")
+        git(self.repo, "add", "status-b.txt")
+        git(self.repo, "commit", "-m", "status feature b")
+
+        git(self.repo, "checkout", "master")
+        git(self.repo, "checkout", "-b", integration)
+        git(self.repo, "merge", "--no-ff", feature_a, "-m", f"Merge branch '{feature_a}' into {integration}")
+        git(self.repo, "merge", "--no-ff", feature_b, "-m", f"Merge branch '{feature_b}' into {integration}")
+        git(
+            self.repo,
+            "commit",
+            "--allow-empty",
+            "-m",
+            f"{bm.MERGE_TAG} {integration} <- {feature_a},{feature_b}",
+        )
+
+        git(self.repo, "checkout", feature_a)
+        with mock.patch.object(bm, "run_git", wraps=bm.run_git) as feature_run_git:
+            _, feature_output = run_flow(self.repo, bm.show_status, [])
+        self.assertIn(f"已被以下集成分支集成: {integration}", feature_output)
+        feature_log_calls = [
+            call for call in feature_run_git.call_args_list
+            if call.args[:4] == (
+                "log", "--all", "-F", f"--grep={bm.MERGE_TAG}"
+            )
+        ]
+        self.assertEqual(len(feature_log_calls), 1)
+
+        git(self.repo, "checkout", integration)
+        with mock.patch.object(bm, "run_git", wraps=bm.run_git) as integration_run_git:
+            _, integration_output = run_flow(self.repo, bm.show_status, [])
+        self.assertIn(
+            f"当前集成的开发分支: {feature_a}、{feature_b}",
+            integration_output,
+        )
+        integration_log_calls = [
+            call for call in integration_run_git.call_args_list
+            if call.args[:4] == (
+                "log", "--all", "-F", f"--grep={bm.MERGE_TAG}"
+            )
+        ]
+        self.assertEqual(len(integration_log_calls), 1)
+
     def test_branch_lists_filter_invalid_remote_names(self) -> None:
         valid_feature = f"feature_valid_{TEST_DATE}"
         valid_integration = f"dev_1.0.0_{TEST_DATE}"

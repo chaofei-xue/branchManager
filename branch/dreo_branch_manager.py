@@ -543,22 +543,45 @@ def is_managed_integration_branch(branch):
     return bool(MANAGED_BRANCH_PATTERNS['integration'].match(branch))
 
 
-def get_tracked_integration_branch_names():
-    """通过 [DREO-MERGE] 记录识别曾作为集成分支使用的分支名（含自定义命名）。"""
-    _, log, _ = run_git('log', '--all', '-F', f'--grep={MERGE_TAG}', '--pretty=format:%s')
-    names = set()
+def get_integration_relationships():
+    """一次扫描全部追踪提交，构建集成分支与开发分支的双向关系。"""
+    _, log, _ = run_git(
+        'log', '--all', '-F', f'--grep={MERGE_TAG}', '--pretty=format:%s'
+    )
+    integration_to_features = {}
+    feature_to_integrations = {}
     marker = f"{MERGE_TAG} "
-    sep = ' <- '
+    separator = ' <- '
+
     for line in log.splitlines():
         if not line.startswith(marker):
             continue
         rest = line[len(marker):]
-        if sep not in rest:
+        if separator not in rest:
             continue
-        name = rest.split(sep, 1)[0].strip()
-        if name:
-            names.add(name)
-    return names
+        integration, branch_list = rest.split(separator, 1)
+        integration = integration.strip()
+        if not integration:
+            continue
+
+        features = integration_to_features.setdefault(integration, [])
+        for branch in branch_list.split(','):
+            branch = branch.strip()
+            if not branch:
+                continue
+            if branch not in features:
+                features.append(branch)
+            integrations = feature_to_integrations.setdefault(branch, [])
+            if integration not in integrations:
+                integrations.append(integration)
+
+    return integration_to_features, feature_to_integrations
+
+
+def get_tracked_integration_branch_names():
+    """通过 [DREO-MERGE] 记录识别曾作为集成分支使用的分支名（含自定义命名）。"""
+    integration_to_features, _ = get_integration_relationships()
+    return set(integration_to_features)
 
 
 def refresh_remote_refs():
@@ -713,10 +736,12 @@ def get_feature_branches():
     return sort_branches_by_date(list(branches), limit=len(branches))
 
 
-def get_integration_branches():
-    all_branches = set(get_local_branches() + get_remote_branches())
-    tracked = get_tracked_integration_branch_names()
-    base = get_master_branch()
+def get_integration_branches(local_branches=None, remote_branches=None, tracked_names=None):
+    local = set(local_branches) if local_branches is not None else set(get_local_branches())
+    remote = set(remote_branches) if remote_branches is not None else set(get_remote_branches())
+    all_branches = local | remote
+    tracked = set(tracked_names) if tracked_names is not None else get_tracked_integration_branch_names()
+    base = 'master' if 'master' in all_branches else ('main' if 'main' in all_branches else None)
     branches = {
         b for b in all_branches
         if (
@@ -740,12 +765,13 @@ def get_master_branch():
     return 'master' if 'master' in branches else ('main' if 'main' in branches else None)
 
 
-def is_integration_branch(branch):
+def is_integration_branch(branch, tracked_names=None):
     if branch.startswith('dev_') or branch.startswith('release_'):
         return True
     if is_managed_feature_branch(branch):
         return False
-    return branch in get_tracked_integration_branch_names()
+    tracked = tracked_names if tracked_names is not None else get_tracked_integration_branch_names()
+    return branch in tracked
 
 
 def get_unmerged_files():
@@ -2226,20 +2252,8 @@ def get_merged_feature_branches(int_branch):
     """通过 DREO-MERGE 标志位查找曾被集成到该分支的所有开发分支
     格式: [DREO-MERGE] {int_branch} <- branch1,branch2,...
     """
-    _, log, _ = run_git('log', '--all', '-F', f'--grep={MERGE_TAG} {int_branch} <-',
-                        '--pretty=format:%s')
-    prefix = f"{MERGE_TAG} {int_branch} <- "
-    seen, result = set(), []
-    for line in log.splitlines():
-        if not line.startswith(prefix):
-            continue
-        branch_list = line[len(prefix):]
-        for b in branch_list.split(','):
-            b = b.strip()
-            if b and b not in seen:
-                seen.add(b)
-                result.append(b)
-    return result
+    integration_to_features, _ = get_integration_relationships()
+    return list(integration_to_features.get(int_branch, []))
 
 
 def update_integration_branch():
@@ -2754,11 +2768,34 @@ def show_status():
     current = get_current_branch()
     local_set = set(get_local_branches())
     remote_set = set(get_remote_branches())
+    integration_to_features, feature_to_integrations = get_integration_relationships()
+    integration_branches = get_integration_branches(
+        local_branches=local_set,
+        remote_branches=remote_set,
+        tracked_names=integration_to_features,
+    )
     features = branch_counts(('feature_', 'bugfix_'), is_managed_feature_branch, local_set, remote_set)
     integrations = branch_counts(('dev_', 'release_'), is_managed_integration_branch, local_set, remote_set)
     branch_text = paint(current, '1', '37')
     print()
-    print(f"  {icon_slot(UI['current_branch'], '32')} 当前分支: {branch_text}\n")
+    print(f"  {icon_slot(UI['current_branch'], '32')} 当前分支: {branch_text}")
+    if is_managed_feature_branch(current):
+        related_names = set(feature_to_integrations.get(current, []))
+        related = [
+            branch for branch in integration_branches
+            if branch in related_names
+        ]
+        if related:
+            print(f"     已被以下集成分支集成: {'、'.join(related)}")
+        else:
+            print("     尚未被任何集成分支集成")
+    elif is_integration_branch(current, tracked_names=integration_to_features):
+        merged_features = integration_to_features.get(current, [])
+        if merged_features:
+            print(f"     当前集成的开发分支: {'、'.join(merged_features)}")
+        else:
+            print("     当前未记录已集成的开发分支")
+    print()
     print(f"     开发分支: {features['total']}（本地：{features['local']}，远端：{features['remote']}）")
     print(f"     集成分支: {integrations['total']}（本地：{integrations['local']}，远端：{integrations['remote']}）")
 
