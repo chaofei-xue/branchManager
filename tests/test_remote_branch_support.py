@@ -979,6 +979,16 @@ class RemoteBranchSupportTest(unittest.TestCase):
             git(self.repo, "rev-parse", f"origin/{release}"),
         )
         self.assertIn(f"本地分支已同步到远端最新: {release}", output)
+        self.assertEqual(
+            git(self.repo, "rev-parse", "1.0.1^{}"),
+            git(self.repo, "rev-parse", "master"),
+        )
+        self.assertEqual(
+            git(self.remote, "rev-parse", "refs/tags/1.0.1^{}"),
+            git(self.repo, "rev-parse", "master"),
+        )
+        self.assertIn("已根据发布分支", output)
+        self.assertIn("Tag [1.0.1] 已同步到远端 origin", output)
 
     def test_merge_release_to_master_skips_when_release_is_already_merged(self) -> None:
         release = f"release_1.0.2_{TEST_DATE}"
@@ -998,6 +1008,11 @@ class RemoteBranchSupportTest(unittest.TestCase):
         )
         first_head = git(self.repo, "rev-parse", "HEAD")
 
+        (self.repo / "after-release.txt").write_text("next\n", encoding="utf-8")
+        git(self.repo, "add", "after-release.txt")
+        git(self.repo, "commit", "-m", "master after release")
+        advanced_head = git(self.repo, "rev-parse", "HEAD")
+
         _, second_output = run_flow(
             self.repo,
             bm.merge_to_master,
@@ -1006,7 +1021,8 @@ class RemoteBranchSupportTest(unittest.TestCase):
         second_head = git(self.repo, "rev-parse", "HEAD")
 
         self.assertIn(f"[{release}] 已成功合并到 master！", first_output)
-        self.assertEqual(first_head, second_head)
+        self.assertEqual(advanced_head, second_head)
+        self.assertEqual(first_head, git(self.repo, "rev-parse", "1.0.2^{}"))
         self.assertIn(f"[{release}] 已合并到 master，已跳过此次操作。", second_output)
         self.assertNotIn(f"[{release}] 已成功合并到 master！", second_output)
 

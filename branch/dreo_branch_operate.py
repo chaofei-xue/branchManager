@@ -62,7 +62,7 @@ def parse_args() -> argparse.Namespace:
             "  4\n"
             "      将 master 合并到当前分支。\n\n"
             "  5 <release分支名>\n"
-            "      将指定 release 分支合并到 master。\n"
+            "      将指定 release 分支合并到 master，自动以版本号打 Tag 并推送远端。\n"
             "      可选: --push --delete-related\n\n"
             "  6\n"
             "      在当前仓库生成 HTML / Markdown 分支处理报告。\n\n"

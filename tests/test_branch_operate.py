@@ -223,6 +223,30 @@ class BranchOperateTest(unittest.TestCase):
         self.assertIn("执行结果: 成功", result.stdout)
         self.assertTrue(result.stdout.strip().endswith("DREO_RESULT=SUCCESS"))
 
+    def test_operate_merge_release_creates_and_pushes_version_tag(self) -> None:
+        release = "release_3.6.0_20260319"
+
+        git(self.repo, "checkout", "-b", release)
+        (self.repo / "release.txt").write_text("release\n", encoding="utf-8")
+        git(self.repo, "add", "release.txt")
+        git(self.repo, "commit", "-m", "release ready")
+        git(self.repo, "push", "-u", "origin", release)
+        git(self.repo, "checkout", "master")
+
+        result = subprocess.run(
+            [sys.executable, str(OPERATE), "5", release],
+            cwd=self.repo,
+            text=True,
+            capture_output=True,
+        )
+
+        self.assertEqual(result.returncode, 0, msg=result.stdout + "\n" + result.stderr)
+        master_head = git(self.repo, "rev-parse", "master")
+        self.assertEqual(git(self.repo, "rev-parse", "3.6.0^{}"), master_head)
+        self.assertEqual(git(self.remote, "rev-parse", "refs/tags/3.6.0^{}"), master_head)
+        self.assertIn("Tag [3.6.0] 已同步到远端 origin", result.stdout)
+        self.assertTrue(result.stdout.strip().endswith("DREO_RESULT=SUCCESS"))
+
     def test_operate_create_custom_integration_branch(self) -> None:
         feature = f"feature_customop_{date.today().strftime('%Y%m%d')}"
         custom_branch = "staging/qa-build"

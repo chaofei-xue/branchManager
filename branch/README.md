@@ -193,6 +193,8 @@ dreo_branch_operate 4 --push
 dreo_branch_operate 5 release_3.6.0_20260415 --push --delete-related
 ```
 
+合并成功后会从分支名中提取版本号（如 `3.6.0`），创建同名 Git Tag，并自动将该 Tag 推送到远端。
+
 删除本地 + 云端分支：
 
 ```bash
